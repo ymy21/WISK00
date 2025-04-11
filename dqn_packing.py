@@ -561,6 +561,7 @@ def final_tree_construction(bottom_nodes, query_workload, level_agents):
             break
 
     print(f"\n[Final Construction Phase] Total Levels in Final Tree: {level}")
+    print_tree_structure(final_tree_structure)
     return final_tree_structure
 ##########################################
 # build_nested_tree 通过层级映射将重跑构造的索引结构转换为实际节点对象
@@ -584,6 +585,7 @@ def build_nested_tree(tree_structure):
 
     # 返回顶层根节点
     root_level = tree_structure[-1]
+    print_nested_tree(root_level)
     if len(root_level) != 1:
         print("Warning: the tree_structure has more than one root.")
         return root_level
@@ -597,4 +599,65 @@ def print_layer_nodes(nodes, layer_level):
         mbr = node.get('MBR')
         print(f"\nNode {idx}: children_count = {children_count}, labels = {labels}, MBR = {mbr}")
 
+
+def print_tree_structure(tree_structure):
+    """
+    打印树结构的统计信息和每层节点的简要信息
+
+    Args:
+        tree_structure: final_tree_construction返回的列表，包含每层节点列表
+    """
+    print("\n======= Tree Structure Summary =======")
+    print(f"Total Levels: {len(tree_structure)}")
+
+    for level, nodes in enumerate(tree_structure):
+        # 只计算非空节点
+        non_empty_nodes = [node for node in nodes if node['MBR'] is not None]
+        print(f"\nLevel {level}: {len(non_empty_nodes)} non-empty nodes")
+
+        # 打印每个节点的简要信息
+        for i, node in enumerate(non_empty_nodes):
+            children_count = len(node['children'])
+            label_count = len(node['labels']) if 'labels' in node else 0
+            mbr_info = "Present" if node['MBR'] is not None else "None"
+            print(f"  Node {i}: {children_count} children, {label_count} labels, MBR: {mbr_info}")
+
+
+def print_nested_tree(root_nodes, level=0):
+    """
+    递归打印构建好的嵌套树结构
+
+    Args:
+        root_node: build_nested_tree返回的根节点
+        level: 当前节点的层级（递归用）
+    """
+    print("\n======= Nested Tree Structure =======")
+    # 检查root_nodes是否为列表
+    if isinstance(root_nodes, list):
+        # 如果是列表，遍历每个节点
+        for node in root_nodes:
+            _print_node_recursive(node, level=0)
+    else:
+        # 如果是单个节点，直接递归打印
+        _print_node_recursive(root_nodes, level=0)
+
+
+def _print_node_recursive(node, level=0):
+    """
+    递归辅助函数，用于打印嵌套树中的节点
+    """
+    indent = "  " * level
+    children_count = len(node['children']) if 'children' in node else 0
+    label_count = len(node['labels']) if 'labels' in node else 0
+
+    print(f"{indent}Level {node.get('layer', '?')} Node: {children_count} children, {label_count} labels")
+
+    # 递归打印子节点
+    if 'children' in node and isinstance(node['children'][0], dict):  # 确保children是节点对象而非索引
+        for i, child in enumerate(node['children']):
+            if i < 5:  # 只打印前5个子节点，避免输出过长
+                _print_node_recursive(child, level + 1)
+            elif i == 5:
+                print(f"{indent}  ... and {len(node['children']) - 5} more children")
+                break
 

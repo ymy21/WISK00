@@ -197,7 +197,6 @@ def search_wisk(query_rect, query_keywords, node, node_counter, obj_counter=None
     obj_counter：如果提供，统计访问的对象数
     """
     results = []
-    query = {'area': query_rect, 'keywords': query_keywords}
 
     def process_node(current_node):
         nonlocal results
@@ -210,6 +209,10 @@ def search_wisk(query_rect, query_keywords, node, node_counter, obj_counter=None
                 process_node(sub_node)
             return
 
+        # 确保当前节点是字典类型
+        if not isinstance(current_node, dict):
+            return
+
         # 获取MBR
         mbr = current_node.get('MBR')
         if mbr is None:
@@ -219,43 +222,38 @@ def search_wisk(query_rect, query_keywords, node, node_counter, obj_counter=None
         if not mbr_intersect(mbr, query_rect):
             return
 
-        # 标签/关键词匹配判断
-        node_keywords = set(current_node.get('labels', []))
-        if not node_keywords or not keyword_intersect(node_keywords, query_keywords):
+        # 获取节点标签/关键词
+        node_labels = set(current_node.get('labels', []))
+        if not node_labels or not keyword_intersect(node_labels, query_keywords):
             return
 
-        # 检查子节点类型，判断是否为内部节点
+        # 检查是否有子节点
         children = current_node.get('children', [])
-        if children and isinstance(children, list) and children:
-            # 内部节点情况
-            if isinstance(children[0], dict) and ('MBR' in children[0] or children[0].get('children')):
-                for child in children:
-                    process_node(child)
-            else:
-                # 叶子节点情况，children中是实际对象
-                for obj in children:
-                    # 增加对象扫描计数
+
+        # 检查子节点类型，如果children是空列表或者不存在，可能是叶子节点
+        if not children:
+            # 检查是否有leaf_objects字段（根据代码，这可能存储了叶子节点的对象）
+            leaf_objects = current_node.get('leaf_objects', [])
+            if leaf_objects:
+                for obj in leaf_objects:
                     if obj_counter is not None:
                         obj_counter[0] += 1
 
                     # 获取对象关键词
-                    obj_keywords = []
-                    if isinstance(obj, dict):
-                        for key_field in ['keywords', 'labels', 'label']:
-                            if key_field in obj:
-                                obj_keywords = obj.get(key_field, [])
-                                break
+                    obj_keywords = obj.get('keywords', [])
 
                     # 检查关键词匹配
                     if keyword_intersect(obj_keywords, query_keywords):
-                        # 对象包含坐标信息时，检查空间匹配
-                        if 'latitude' in obj and 'longitude' in obj:
-                            if (query_rect['min_lat'] <= obj['latitude'] <= query_rect['max_lat'] and
-                                    query_rect['min_lon'] <= obj['longitude'] <= query_rect['max_lon']):
-                                results.append(obj)
-                        else:
-                            # 如果对象没有坐标，假定它在父节点MBR内
+                        # 检查对象是否在查询区域内
+                        if ('latitude' in obj and 'longitude' in obj and
+                                query_rect['min_lat'] <= obj['latitude'] <= query_rect['max_lat'] and
+                                query_rect['min_lon'] <= obj['longitude'] <= query_rect['max_lon']):
                             results.append(obj)
+            return
+
+        # 如果有子节点且是对象引用（不是索引），则处理子节点
+        for child in children:
+            process_node(child)
 
     # 开始处理节点
     process_node(node)
