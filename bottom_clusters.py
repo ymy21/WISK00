@@ -4,8 +4,9 @@ import numpy as np
 import torch
 import pandas as pd
 from scipy.stats import norm
+from collections import defaultdict
 
-class PriorityQueue:  #要改：还没有实现优先队列的
+class PriorityQueue:
     def __init__(self, query_workload, max_size=1000):
         self.queue = []
         self.query_workload = query_workload
@@ -26,20 +27,102 @@ class PriorityQueue:  #要改：还没有实现优先队列的
     def is_empty(self):
         return len(self.queue) == 0
 
+
+class LeafNode:
+    """Leaf node for WISK tree containing objects and inverted file index"""
+
+    def __init__(self, layer,mbr, objects, node_id=None):
+        self.mbr = mbr  # {min_lat, max_lat, min_lon, max_lon}
+        self.is_leaf = True
+        self.objects = objects
+        self.inverted_file = self._build_inverted_file()
+        self.id = node_id
+        self.labels = self.get_keywords()  # All keywords in this leaf node
+        self.layer = 0
+
+    def _build_inverted_file(self):
+        """Build inverted file index for keywords in this leaf node"""
+        inverted_file = defaultdict(list)
+        for i, obj in enumerate(self.objects):
+            for keyword in obj['keywords']:
+                inverted_file[keyword].append(i)  # Store object index in the inverted file
+        return dict(inverted_file)
+
+    def get_objects_by_keyword(self, keyword):
+        """Retrieve objects containing the given keyword"""
+        if keyword not in self.inverted_file:
+            return []
+        return [self.objects[idx] for idx in self.inverted_file[keyword]]
+
+    def get_keywords(self):
+        """Return all keywords in this leaf node"""
+        return set(self.inverted_file.keys())
+
+    def to_dict(self):
+        """Convert to dictionary format for compatibility with existing code"""
+        return {
+            'layer': 0,
+            'MBR': self.mbr,
+            'labels': list(self.get_keywords()),
+            'children': [],
+            'leaf_objects': self.objects,
+            'inverted_file': self.inverted_file,
+            'is_leaf': True,
+            'id': self.id
+        }
+
+# def calculate_intersecting_queries(subspace, query_workload):
+#     count = 0
+#     #print(f"subspace: {subspace}, type: {type(subspace)}")
+#     if not subspace.get('labels'):  # 无关键词的子空间直接过滤
+#         print(f"子空间无关键词labels。")
+#         return 0
+#     subspace_keywords = subspace.get('labels', set())
+#     for query in query_workload:
+#         # 检查空间交集
+#         spatial_intersect = (
+#                 subspace['min_lat'] <= query['area']['max_lat'] and
+#                 subspace['max_lat'] >= query['area']['min_lat'] and
+#                 subspace['min_lon'] <= query['area']['max_lon'] and
+#                 subspace['max_lon'] >= query['area']['min_lon']
+#         )
+#         # 检查关键词交集（使用集合操作）
+#         keyword_intersect = bool(set(query['keywords']) & subspace_keywords)
+#
+#         if spatial_intersect and keyword_intersect:
+#             count += 1
+#     return count
+
 def calculate_intersecting_queries(subspace, query_workload):
     count = 0
-    #print(f"subspace: {subspace}, type: {type(subspace)}")
-    if not subspace.get('labels'):  # 无关键词的子空间直接过滤
-        print(f"子空间无关键词labels。")
+
+    # Handle different node types
+    if isinstance(subspace, dict):  # Old format
+        if not subspace.get('labels'):
+            print(f"子空间无关键词labels。")
+            return 0
+        subspace_keywords = subspace.get('labels', set())
+        mbr = {
+            'min_lat': subspace['min_lat'],
+            'max_lat': subspace['max_lat'],
+            'min_lon': subspace['min_lon'],
+            'max_lon': subspace['max_lon']
+        }
+    elif isinstance(subspace, LeafNode):  # New LeafNode format
+        subspace_keywords = subspace.get_keywords()
+        mbr = subspace.mbr
+    else:
+        print(f"Unknown subspace type: {type(subspace)}")
         return 0
-    subspace_keywords = subspace.get('labels', set())
+
     for query in query_workload:
         # 检查空间交集
+        query_mbr = query['area']
         spatial_intersect = (
-                subspace['min_lat'] <= query['area']['max_lat'] and
-                subspace['max_lat'] >= query['area']['min_lat'] and
-                subspace['min_lon'] <= query['area']['max_lon'] and
-                subspace['max_lon'] >= query['area']['min_lon']
+                mbr['min_lat'] <= query_mbr['max_lat'] and
+                mbr['max_lat'] >= query_mbr['min_lat'] and
+                mbr['min_lon'] <= query_mbr['max_lon'] and
+                mbr['max_lon'] >= query_mbr['min_lon']
         )
         # 检查关键词交集（使用集合操作）
         keyword_intersect = bool(set(query['keywords']) & subspace_keywords)
@@ -292,6 +375,7 @@ def bottom_clusters_generation(query_workload, data_space, cdf_models, w1=0.1, w
     # 初始化优先队列
     Q = PriorityQueue(query_workload)
     G = []  # 存储最终生成的聚类
+    node_id_counter = 0
 
     # 将整个数据空间添加到队列
     for item in data_space:
@@ -307,8 +391,18 @@ def bottom_clusters_generation(query_workload, data_space, cdf_models, w1=0.1, w
         num_objects = len(s['objects'])
         # 对象数过少，直接加入结果
         if len(s['objects']) < MIN_OBJECTS:
-            G.append(s)
+            # 创建叶子节点并添加到结果
+            mbr = {
+                'min_lat': s['min_lat'],
+                'max_lat': s['max_lat'],
+                'min_lon': s['min_lon'],
+                'max_lon': s['max_lon']
+            }
+            leaf_node = LeafNode(0,mbr, s['objects'], node_id=node_id_counter)
+            node_id_counter += 1
+            G.append(leaf_node)
             continue
+
         num_queries = calculate_intersecting_queries(s, query_workload) #这部分要改：不仅mbr要交，keyword也得匹配
         Cs = num_objects * num_queries  # 原函数简化为直接计算
 
@@ -335,30 +429,31 @@ def bottom_clusters_generation(query_workload, data_space, cdf_models, w1=0.1, w
                 Q.enqueue(s2)
                 print(f"成本缩小，可以分割")
             else:
-                G.append(s)
+                # 创建叶子节点并添加到结果
+                mbr = {
+                    'min_lat': s['min_lat'],
+                    'max_lat': s['max_lat'],
+                    'min_lon': s['min_lon'],
+                    'max_lon': s['max_lon']
+                }
+                leaf_node = LeafNode(0,mbr, s['objects'], node_id=node_id_counter)
+                node_id_counter += 1
+                G.append(leaf_node)
         else:
-            G.append(s)
-        #
-        # print(f"初始空间成本: {Cs}, 最佳分割成本: {best['cost']}, 阈值: {w1 * len(query_workload)}")
-        # # 判断是否继续分割 ( 对象检查节省 > 集群检查新增 )
-        # if Cs - w2 * best['cost'] > (w1 * len(query_workload)) and best['val'] is not None:
-        #     # 生成子空间
-        #     print(f"进入分割了！")
-        #     # 改：进入分割，但是为什么只有一个cluster，一分肯定为2
-        #     s1, s2 = generate_subspace(s, dim=best['dim'], split_value=best['val'])
-        #
-        #     # 检查子空间有效性
-        #     if s1 and s2 and (len(s1['objects']) > 0 or len(s2['objects']) > 0):
-        #         if len(s1['objects']) > 0:
-        #             Q.enqueue(s1)
-        #         if len(s2['objects']) > 0:
-        #             Q.enqueue(s2)
-        #         print(f"进入重分割代码")
-        #     else:
-        #         G.append(s)
-        # else:
-        #     G.append(s)
+            # 创建叶子节点并添加到结果
+            mbr = {
+                'min_lat': s['min_lat'],
+                'max_lat': s['max_lat'],
+                'min_lon': s['min_lon'],
+                'max_lon': s['max_lon']
+            }
+            leaf_node = LeafNode(0,mbr, s['objects'], node_id=node_id_counter)
+            node_id_counter += 1
+            G.append(leaf_node)
+
 
 
     print(f"已生成聚类数: {len(G)}")
-    return G
+    # 转换为字典格式以兼容当前代码
+    bottom_nodes = [leaf_node.to_dict() for leaf_node in G]
+    return bottom_nodes

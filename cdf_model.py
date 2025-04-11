@@ -145,11 +145,11 @@ def train_cdf_models(data, query_workload, epochs=100, lr=0.06):
             total_keyword_num += 1
     # 统计关键词频率（计算每个关键词在数据集中的频率（单位‰））
     # total_data = len(data) #要改：不是所有的keyword的数量，可能不是1对1的关系
-    keyword_freq = {kw: (count / (total_keyword_num))  for kw, count in keyword_counts.items()}
+    keyword_freq = {kw: (count / total_keyword_num)  for kw, count in keyword_counts.items()}
 
-    # 定义频率阈值 - 单位为百分之一 （改回千分之一）
-    low_threshold = 0.001  # 低频关键词
-    medium_threshold =0.1  # 中频关键词
+    # 定义频率阈值
+    low_threshold = 0.000001  # 低频关键词
+    medium_threshold =0.0001  # 中频关键词
 
     # 提取所有关键词（从查询和数据集的并集）
     keywords = set(keyword_counts.keys())

@@ -12,7 +12,7 @@ print("Using device:", device)
 # 环境部分：PackingEnv
 ##########################################
 class PackingEnv:
-    def __init__(self, current_layer_nodes, query_workload, current_layer_level, w1=0.1, w2=1.0):
+    def __init__(self, current_layer_nodes, query_workload, current_layer_level, w1=0.1, w2=0.5):
         # 成本参数：w1 表示扫描一个节点的固定成本，w2 表示验证该节点中对象的成本
         self.w1 = w1
         self.w2 = w2
@@ -425,20 +425,20 @@ def hierarchical_packing_training(bottom_nodes, query_workload, max_level=10):
 
         prev_non_empty = current_non_empty
 
-    # # 绘制各层训练奖励曲线
-    # n_levels = len(all_rewards)
-    # fig, axs = plt.subplots(n_levels, 1, figsize=(10, 4 * n_levels))
-    # if n_levels == 1:
-    #     axs = [axs]
-    # for i, rewards in enumerate(all_rewards):
-    #     axs[i].plot(range(1, len(rewards) + 1), rewards, marker='o', label=f"Level {i + 1}")
-    #     axs[i].set_xlabel("Epoch")
-    #     axs[i].set_ylabel("Total Reward")
-    #     axs[i].set_title(f"Convergence Curve for Level {i + 1}")
-    #     axs[i].legend()
-    #     axs[i].grid()
-    # plt.tight_layout()
-    # plt.show()
+    # 绘制各层训练奖励曲线
+    n_levels = len(all_rewards)
+    fig, axs = plt.subplots(n_levels, 1, figsize=(10, 4 * n_levels))
+    if n_levels == 1:
+        axs = [axs]
+    for i, rewards in enumerate(all_rewards):
+        axs[i].plot(range(1, len(rewards) + 1), rewards, marker='o', label=f"Level {i + 1}")
+        axs[i].set_xlabel("Epoch")
+        axs[i].set_ylabel("Total Reward")
+        axs[i].set_title(f"Convergence Curve for Level {i + 1}")
+        axs[i].legend()
+        axs[i].grid()
+    plt.tight_layout()
+    plt.show()
 
     print(f"\n[Training Phase] Total Levels Trained: {current_layer_level}")
     return level_agents, training_upper_layers, current_layer_level

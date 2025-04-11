@@ -9,7 +9,8 @@ from dqn_packing import (
 from query_processing import process_query
 import pandas as pd
 import torch
-from rtree_index import compare_scheme1, compare_scheme2
+# 导入修改后的R-tree比较函数
+from rtree_index import compare_rtree_wisk
 import matplotlib.pyplot as plt
 import seaborn as sns
 
@@ -81,40 +82,40 @@ def main():
 
     # 5. 构建底层节点
     print("Building bottom nodes...")
-    bottom_nodes = []
+    #bottom_nodes = []
     train_queries = query_workload['train']
     if isinstance(train_queries, pd.DataFrame):
         train_queries = train_queries.to_dict('records')  # 转换为字典列表
-    # 对cluster做简单处理，变成dqn最底层节点
-    for cluster in clusters:
-        labels = set()
-        mbr = {
-            'min_lat': cluster['min_lat'],
-            'max_lat': cluster['max_lat'],
-            'min_lon': cluster['min_lon'],
-            'max_lon': cluster['max_lon']
-        }
-        # for obj in cluster['objects']:
-        #     labels.update(obj['keywords'])
-        bottom_node= {
-            'layer': 0,
-            'MBR': mbr,
-            'labels': list(cluster['labels']), #上面底部簇生成也用了labels，将集合转化为列表
-            'children': [],         # 下层节点引用（此处为空，因为叶节点不再重复存储原始对象）
-            'leaf_objects': cluster['objects']  # 将原始对象存于 leaf_objects 中
-        }
-        bottom_nodes.append(bottom_node)
-    print(f"Bottom nodes built: {len(bottom_nodes)} nodes.")
-
+    # # 对cluster做简单处理，变成dqn最底层节点
+    # for cluster in clusters:
+    #     labels = set()
+    #     mbr = {
+    #         'min_lat': cluster['min_lat'],
+    #         'max_lat': cluster['max_lat'],
+    #         'min_lon': cluster['min_lon'],
+    #         'max_lon': cluster['max_lon']
+    #     }
+    #     # for obj in cluster['objects']:
+    #     #     labels.update(obj['keywords'])
+    #     bottom_node= {
+    #         'layer': 0,
+    #         'MBR': mbr,
+    #         'labels': list(cluster['labels']), #上面底部簇生成也用了labels，将集合转化为列表
+    #         'children': [],         # 下层节点引用（此处为空，因为叶节点不再重复存储原始对象）
+    #         'leaf_objects': cluster['objects']  # 将原始对象存于 leaf_objects 中
+    #     }
+    #     bottom_nodes.append(bottom_node)
+    print(f"Bottom nodes built: {len(clusters)} nodes.")
+    avg_objects_per_leaf = num_object // len(clusters)
     # 6. 强化学习训练阶段
     print("Starting reinforcement learning training phase...")
 
-    level_agents, training_upper_layers, total_levels = hierarchical_packing_training(bottom_nodes, train_queries, max_level=10)
+    level_agents, training_upper_layers, total_levels = hierarchical_packing_training(clusters, train_queries, max_level=25)
     print(f"Reinforcement learning training completed. Total levels: {total_levels}")
 
     # 7. 重跑构造阶段
     print("Starting final tree construction phase...")
-    final_tree = final_tree_construction(bottom_nodes, train_queries, level_agents)
+    final_tree = final_tree_construction(clusters, train_queries, level_agents)
     print("Final tree structure constructed.")
 
     # 8. 转换成树结构
@@ -133,13 +134,48 @@ def main():
     comp_queries = query_workload['compare'].to_dict('records')
 
     print("\nComparing query costs between R‑tree and WISK index:")
-    print("\n Scheme 1:")
-    #1：叶节点是单个object
-    compare_scheme1(data, root_node, comp_queries)
-    print("\n-----------------------------\n")
-    print("\n Scheme 2:")
-    # 2：叶节点是单个cluster
-    compare_scheme2(bottom_nodes, root_node, comp_queries)
+    objects = []
+    for _, row in data.iterrows():
+        objects.append({
+            'latitude': row['latitude'],
+            'longitude': row['longitude'],
+            'keywords': list(row['keywords'])
+        })
+    # 调用增强版的比较函数
+    comparison_results = compare_rtree_wisk(objects, root_node, comp_queries,avg_objects_per_leaf)
+
+    # # 可以选择绘制图表进行可视化
+    # if sns is not None:  # 确保seaborn已安装
+    #     plt.figure(figsize=(15, 5))
+    #
+    #     # 节点访问对比
+    #     node_stats = {'R-tree': comparison_results['avg_rtree_nodes'], 'WISK': comparison_results['avg_wisk_nodes']}
+    #     plt.subplot(131)
+    #     sns.barplot(x=list(node_stats.keys()), y=list(node_stats.values()))
+    #     plt.title('节点访问数对比')
+    #     plt.ylabel('平均节点访问数')
+    #
+    #     # 对象扫描对比
+    #     object_stats = {'R-tree': comparison_results['avg_rtree_objects'],
+    #                     'WISK': comparison_results['avg_wisk_objects']}
+    #     plt.subplot(132)
+    #     sns.barplot(x=list(object_stats.keys()), y=list(object_stats.values()))
+    #     plt.title('对象扫描数对比')
+    #     plt.ylabel('平均对象扫描数')
+    #
+    #     # 总代价对比
+    #     total_stats = {
+    #         'R-tree': comparison_results['avg_rtree_nodes'] + comparison_results['avg_rtree_objects'],
+    #         'WISK': comparison_results['avg_wisk_nodes'] + comparison_results['avg_wisk_objects']
+    #     }
+    #     plt.subplot(133)
+    #     sns.barplot(x=list(total_stats.keys()), y=list(total_stats.values()))
+    #     plt.title('总代价对比')
+    #     plt.ylabel('平均总代价')
+    #
+    #     plt.tight_layout()
+    #     plt.savefig('rtree_vs_wisk_performance.png')
+    #     plt.close()
 
 if __name__ == "__main__":
     main()
