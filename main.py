@@ -110,12 +110,12 @@ def main():
     # 6. 强化学习训练阶段
     print("Starting reinforcement learning training phase...")
 
-    level_agents, training_upper_layers, total_levels = hierarchical_packing_training(clusters, train_queries, max_level=25)
+    agent, training_upper_layers, total_levels = hierarchical_packing_training(clusters, train_queries, max_level=25)
     print(f"Reinforcement learning training completed. Total levels: {total_levels}")
 
     # 7. 重跑构造阶段
     print("Starting final tree construction phase...")
-    final_tree = final_tree_construction(clusters, train_queries, level_agents)
+    final_tree = final_tree_construction(clusters, train_queries, agent)
     print("Final tree structure constructed.")
 
     # 8. 转换成树结构

@@ -12,10 +12,8 @@ print("Using device:", device)
 # 环境部分：PackingEnv
 ##########################################
 class PackingEnv:
-    def __init__(self, current_layer_nodes, query_workload, current_layer_level, w1=0.1, w2=0.5):
-        # 成本参数：w1 表示扫描一个节点的固定成本，w2 表示验证该节点中对象的成本
-        self.w1 = w1
-        self.w2 = w2
+    def __init__(self, current_layer_nodes, query_workload, current_layer_level):
+
         if not current_layer_nodes:
             raise ValueError("current_layer_nodes cannot be empty")
         self.current_layer = current_layer_nodes  # 当前层待打包节点
@@ -28,7 +26,7 @@ class PackingEnv:
         self.upper_layer = []
         for i in range(self.N):
             # 每个上层节点赋予临时 id（层号后续在主流程中更新）
-            node = {'layer': self.current_layer_level+1, 'labels': [], 'children': [], 'MBR': None}
+            node = {'id': i, 'layer': self.current_layer_level+1, 'labels': [], 'children': [], 'MBR': None}
             self.upper_layer.append(node)
 
         self.current_step = 0
@@ -149,41 +147,19 @@ class PackingEnv:
         new_access = self._calculate_access_cost()
         # 采用平均每个查询节点访问数减少作为 reward
         # 计算并应用奖励缩放，提高训练稳定性
-        raw_reward = prev_access - new_access
-        reward = raw_reward * 1.0  # 缩放因子，增加梯度信号强度
+        reward = prev_access - new_access
 
         # 更新累积奖励，用于终止条件判断
         self.total_reward += reward
 
-        # 应用论文终止条件：如果累积奖励不大于-N，提前终止
-        if self.total_reward <= -self.N:
+        # # 应用论文终止条件：如果累积奖励不大于-N，提前终止
+        # if self.total_reward <= -self.N:
+        #     done = True
+        if done and (new_access > self.N):
             done = True
-
+            print("终止条件触发：当前访问节点数大于初始访问节点数")
         return next_state, reward, done
 
-    # 不匹配的也得访问检查
-    # def _calculate_access_cost(self):
-    #     total = 0
-    #     for query in self.query_workload:
-    #         # 上层部分：对于每个非空上层节点，都要访问，加上匹配时访问 children 的额外开销
-    #         upper_cost = 0
-    #         for node in self.upper_layer:
-    #             if node['MBR'] is None:
-    #                 continue
-    #             # 每个非空节点的基本访问成本
-    #             upper_cost += 1
-    #             # 如果节点与查询匹配，则额外加上 children 数
-    #             if self._mbr_intersect(node['MBR'], query) and any(kw in node['labels'] for kw in query['keywords']):
-    #                 upper_cost += len(node['children'])
-    #
-    #         # 下层部分：每个未打包的非空节点都要访问
-    #         lower_cost = 0
-    #         for i in range(self.current_step, len(self.current_layer)):
-    #             if self.current_layer[i]['MBR'] is not None:
-    #                 lower_cost += 1
-    #
-    #         total += (upper_cost + lower_cost)
-    #     return total / len(self.query_workload)
     def _calculate_access_cost(self):
         """
         计算所有查询的平均节点访问数。
@@ -204,22 +180,22 @@ class PackingEnv:
                     continue
 
                 # 每个非空上层节点都需要访问一次
-                query_access += self.w1  # 基本访问成本
+                query_access += 1  # 基本访问成本
 
                 # 如果节点与查询匹配，还需要访问其子节点
                 if self._mbr_intersect(node['MBR'], query) and any(kw in node['labels'] for kw in query['keywords']):
                     # 每个子节点的访问成本
-                    query_access += len(node['children']) * self.w2
+                    query_access += len(node['children'])
 
             # 下层部分：未打包的节点
             for i in range(self.current_step, len(self.current_layer)):
                 if self.current_layer[i]['MBR'] is not None:
-                    query_access += self.w1  # 未打包节点的访问成本
-
-                    # 如果节点与查询匹配，计算验证成本
-                    if self._mbr_intersect(self.current_layer[i]['MBR'], query) and any(
-                            kw in self.current_layer[i]['labels'] for kw in query['keywords']):
-                        query_access += self.w2  # 验证成本
+                    query_access += 1  # 未打包节点的访问成本
+                    #
+                    # # 如果节点与查询匹配，计算验证成本
+                    # if self._mbr_intersect(self.current_layer[i]['MBR'], query) and any(
+                    #         kw in self.current_layer[i]['labels'] for kw in query['keywords']):
+                    #     query_access += self.w2  # 验证成本
 
             total_access += query_access
 
@@ -257,7 +233,7 @@ class DQN(nn.Module):
             nn.ReLU(),
             nn.Linear(hidden_dim, hidden_dim),  # 第二隐藏层
             nn.ReLU(),
-            nn.Linear(hidden_dim, hidden_dim),  # 第三隐藏层（论文要求）
+            nn.Linear(hidden_dim, hidden_dim),  # 第三隐藏层
             nn.ReLU(),
             nn.Linear(hidden_dim, action_dim)
         )
@@ -280,13 +256,18 @@ class DQNAgent:
 
         self.optimizer = torch.optim.Adam(self.policy_net.parameters(), lr=lr)
 
-        self.memory = deque(maxlen=10000)
+        self.memory = deque(maxlen=256) #根据论文设定
         self.batch_size = 64
         self.gamma = gamma
 
         self.epsilon = 1.0
         self.epsilon_min = 0.01
         self.epsilon_decay = 0.995
+
+        # 添加epsilon衰减计数器
+        self.epsilon_update_counter = 0
+        self.epsilon_update_freq = 10  # 每10个epoch更新一次epsilon
+
         # 添加步数计数和目标网络更新频率
         self.steps_done = 0
         self.target_update_freq = 10  # 每10步更新一次
@@ -314,60 +295,90 @@ class DQNAgent:
             return 0.0, 0.0, 0.0 # 返回loss, max_q, min_q
         # 计数更新步数
         self.steps_done += 1
+#for
+        # 增加多次训练循环，每次打包一个节点可以训练多次
+        avg_loss = 0.0
+        avg_max_q = 0.0
+        avg_min_q = 0.0
+        training_iterations = 50  # 每次打包后训练多次网络
 
-        batch = random.sample(self.memory, self.batch_size)
-        states, actions, rewards, next_states = zip(*batch)
+        for _ in range(training_iterations):
+            batch = random.sample(self.memory, self.batch_size)
+            states, actions, rewards, next_states = zip(*batch)
 
-        states = torch.FloatTensor(np.array(states)).to(device)
-        actions = torch.LongTensor(actions).to(device)
-        rewards = torch.FloatTensor(rewards).to(device)
+            states = torch.FloatTensor(np.array(states)).to(device)
+            actions = torch.LongTensor(actions).to(device)
+            rewards = torch.FloatTensor(rewards).to(device)
 
-        # 处理非终止状态
-        non_final_mask = torch.tensor([s is not None for s in next_states], dtype=torch.bool, device=device)
-        non_final_next_states = torch.FloatTensor( np.array([s for s in next_states if s is not None])).to(device)
+            # 处理非终止状态
+            non_final_mask = torch.tensor([s is not None for s in next_states], dtype=torch.bool, device=device)
+            non_final_next_states = torch.FloatTensor(np.array([s for s in next_states if s is not None])).to(device)
 
-        # 计算当前 Q 值
-        current_q = self.policy_net(states).gather(1, actions.unsqueeze(1)).squeeze(1)
+            # 计算当前 Q 值
+            current_q = self.policy_net(states).gather(1, actions.unsqueeze(1)).squeeze(1)
 
-        # 计算目标Q值
-        next_q = torch.zeros(self.batch_size, device=device)
-        if non_final_mask.sum() > 0:
-            next_q[non_final_mask] = self.target_net(non_final_next_states).max(1)[0].detach()
-        target_q = rewards + self.gamma * next_q
+            # 计算目标Q值
+            next_q = torch.zeros(self.batch_size, device=device)
+            if non_final_mask.sum() > 0:
+                next_q[non_final_mask] = self.target_net(non_final_next_states).max(1)[0].detach()
+            target_q = rewards + self.gamma * next_q
 
-        loss = nn.MSELoss()(current_q, target_q)
-        self.optimizer.zero_grad()
-        loss.backward()
-        # 梯度裁剪，防止梯度爆炸
-        torch.nn.utils.clip_grad_norm_(self.policy_net.parameters(), max_norm=1.0)
-        self.optimizer.step()
+            loss = nn.MSELoss()(current_q, target_q)
+            self.optimizer.zero_grad()
+            loss.backward()
+            # 梯度裁剪，防止梯度爆炸
+            torch.nn.utils.clip_grad_norm_(self.policy_net.parameters(), max_norm=1.0)
+            self.optimizer.step()
 
-        # 每C步更新一次目标网络，按论文要求
+            # 更新统计量
+            with torch.no_grad():
+                avg_loss += loss.item()
+                avg_max_q += current_q.max().item()
+                avg_min_q += current_q.min().item()
+
+        # 每C步更新一次目标网络
         if self.steps_done % self.target_update_freq == 0:
             self.soft_update_target()
 
-        self.epsilon = max(self.epsilon_min, self.epsilon * self.epsilon_decay)
-        # 添加Q值监控
-        with torch.no_grad():
-            max_q = current_q.max().item()
-            min_q = current_q.min().item()
-        return loss.item(), max_q, min_q
+        # 返回平均统计量
+        return avg_loss / training_iterations, avg_max_q / training_iterations, avg_min_q / training_iterations
 
     def soft_update_target(self, tau=0.001):
         for target_param, policy_param in zip(self.target_net.parameters(), self.policy_net.parameters()):
             target_param.data.copy_(tau * policy_param.data + (1 - tau) * target_param.data)
+
+    def update_epsilon(self):
+        """在每个epoch结束后调用，控制epsilon的衰减频率"""
+        self.epsilon_update_counter += 1
+        if self.epsilon_update_counter >= self.epsilon_update_freq:
+            self.epsilon = max(self.epsilon_min, self.epsilon * self.epsilon_decay)
+            self.epsilon_update_counter = 0
 
 
 ##########################################
 # 分层训练阶段：每层训练只保留当前层与上层的信息
 # 将训练阶段与重跑构造阶段分离，训练阶段保存每一层训练得到的 RL 模型
 ##########################################
-def hierarchical_packing_training(bottom_nodes, query_workload, max_level=10):
+def hierarchical_packing_training(bottom_nodes, query_workload, max_level=20):
+    # 首先确保底层节点有正确的 id 和 layer 信息
+    for i, node in enumerate(bottom_nodes):
+        if 'id' not in node:
+            node['id'] = i  # 简单整数id，表示节点序号
+        if 'layer' not in node:
+            node['layer'] = 0
+
     current_layer = bottom_nodes
     current_layer_level = 0
-    level_agents = []         # 保存每层训练得到的 RL 代理
     training_upper_layers = []  # 保存每层的中间上层节点（训练阶段结果）
     all_rewards = []          # 保存每层训练时的奖励曲线
+
+    # 初始化全局单一agent（所有层共用）
+    # 计算状态空间和动作空间维度
+    m = len(query_workload)
+    N = len(bottom_nodes)
+    state_dim = (m + 1) * N + m
+    action_dim = N
+    global_agent = DQNAgent(state_dim, action_dim)
 
     for level in range(max_level):
          # 初始化前一层的非空节点数
@@ -380,9 +391,8 @@ def hierarchical_packing_training(bottom_nodes, query_workload, max_level=10):
 
         print(f"\n[Training Phase] Level {level + 1} Training...")
         # 训练当前层：当前层节点与预先初始化的 N 个空上层节点组成固定状态
-        agent, total_rewards = train_single_level(current_layer, query_workload, current_layer_level)
+        _, total_rewards = train_single_level(current_layer, query_workload, current_layer_level, global_agent)
         all_rewards.append(total_rewards)
-        level_agents.append(agent)
 
         # 用当前训练好的代理对当前层数据进行一次模拟打包（依然使用 ε-greedy 策略）
         env = PackingEnv(current_layer, query_workload, current_layer_level)
@@ -390,16 +400,19 @@ def hierarchical_packing_training(bottom_nodes, query_workload, max_level=10):
         total_reward = 0
         done = False
 
-        while True:
+        while not done:
             valid_actions = env.get_valid_actions()
-            action = agent.select_action(state, valid_actions)
+            action = global_agent.select_action(state, valid_actions)
             next_state, reward, done = env.step(action)
             total_reward += reward
-            # 应用论文终止条件
-            # total——reward计算的不对，应该是前后两次的差值
-            if total_reward <= -env.N or done:
+            # # 应用论文终止条件
+            # # total——reward计算的不对，应该是前后两次的差值
+            # if total_reward <= -env.N or done:
+            #     break
+            if next_state is not None:
+                state = next_state
+            else:
                 break
-            state = next_state
 
         # 打印本层打包后上层节点的详细信息
         print(f"\nAfter packing Level {level + 1}, upper_layer nodes:")
@@ -418,10 +431,10 @@ def hierarchical_packing_training(bottom_nodes, query_workload, max_level=10):
         # 保存当前层的上层节点（全部 N 个，状态维度固定）
         training_upper_layers.append(env.upper_layer.copy())
 
-        # # 终止条件3 ：上层空节点只剩一个
-        # if current_non_empty == 1:
-        #     print(f"Reached one non-empty node. Stopping training.")
-        #     break
+        # 终止条件3 ：上层空节点只剩一个
+        if current_non_empty == 1:
+            print(f"Reached one non-empty node. Stopping training.")
+            break
 
         prev_non_empty = current_non_empty
 
@@ -431,32 +444,29 @@ def hierarchical_packing_training(bottom_nodes, query_workload, max_level=10):
     if n_levels == 1:
         axs = [axs]
     for i, rewards in enumerate(all_rewards):
-        axs[i].plot(range(1, len(rewards) + 1), rewards, marker='o', label=f"Level {i + 1}")
+        rewards_array = np.array([float(r) for r in rewards])
+        axs[i].plot(range(1, len(rewards_array) + 1), rewards_array, marker='o', label=f"Level {i + 1}")
         axs[i].set_xlabel("Epoch")
         axs[i].set_ylabel("Total Reward")
         axs[i].set_title(f"Convergence Curve for Level {i + 1}")
         axs[i].legend()
         axs[i].grid()
+
     plt.tight_layout()
     plt.show()
 
     print(f"\n[Training Phase] Total Levels Trained: {current_layer_level}")
-    return level_agents, training_upper_layers, current_layer_level
+    return global_agent, training_upper_layers, current_layer_level
 
 ##########################################
 # 单层训练函数：训练 RL 代理以优化当前层的 packing 策略
 ##########################################
-def train_single_level(current_layer, query_workload, current_layer_level, epochs=180):
+def train_single_level(current_layer, query_workload, current_layer_level, agent, epochs=180):
     # 添加数据验证
     if len(query_workload) == 0:
         raise ValueError("Query workload is empty")
     if len(current_layer) == 0:
         raise ValueError("Current layer nodes are empty")
-    m = len(query_workload)
-    N = len(current_layer)
-    state_dim = (m + 1) * N + m
-    action_dim = N
-    agent = DQNAgent(state_dim, action_dim)
 
     total_rewards = []  # 记录每轮训练的总奖励
     loss_history = []  # 新增loss记录
@@ -480,16 +490,20 @@ def train_single_level(current_layer, query_workload, current_layer_level, epoch
             # if total_reward <= -env.N:  # 论文条件
             #     done = True
 
-            agent.store_transition(state, action, reward, next_state)
-            loss, max_q, min_q = agent.update_model()
-            if loss != 0.0:
-                epoch_loss.append(loss)
-                epoch_max_q.append(max_q)
-                epoch_min_q.append(min_q)
+            # 存储经验
             if next_state is not None:
+                agent.store_transition(state, action, reward, next_state)
+                loss, max_q, min_q = agent.update_model()
+                if loss != 0.0:
+                    epoch_loss.append(loss)
+                    epoch_max_q.append(max_q)
+                    epoch_min_q.append(min_q)
                 state = next_state
             else:
                 break
+        # 在每个epoch结束后更新epsilon
+        agent.update_epsilon()
+
         # 记录统计量
         avg_loss = np.mean(epoch_loss) if epoch_loss else 0.0
         avg_max_q = np.mean(epoch_max_q) if epoch_max_q else 0.0
@@ -519,16 +533,26 @@ def train_single_level(current_layer, query_workload, current_layer_level, epoch
 ##########################################
 # 重跑构造阶段：利用训练阶段学到的 RL 模型，重新跑一遍所有数据以生成最终树结构
 ##########################################
-def final_tree_construction(bottom_nodes, query_workload, level_agents):
+def final_tree_construction(bottom_nodes, query_workload, global_agent):
+    # 确保底层节点有正确的 id 和 layer 信息
+    for i, node in enumerate(bottom_nodes):
+        if 'id' not in node:
+            node['id'] = i  # 简单整数id
+        if 'layer' not in node:
+            node['layer'] = 0
+
     current_layer = bottom_nodes
     filter_current_layer =  [node for node in current_layer if  node['MBR'] is not None]
     final_tree_structure = [filter_current_layer.copy()]  # 保存完整层级结构 (第0层 # 每层的最终上层节点（固定 N 个）
     level = 0
     current_layer_level = 0
-    for agent in level_agents:
+    # 设置为贪婪策略（不再探索）
+    global_agent.epsilon = 0.0
+
+    while True:
         print(f"\n[Final Construction Phase] Processing Level {level + 1} ...")
         # 在重跑阶段采用贪婪策略：设置 ε = 0
-        agent.epsilon = 0.0
+
         env = PackingEnv(current_layer, query_workload, current_layer_level)
         state = env.reset()
         total_reward = 0
@@ -536,14 +560,14 @@ def final_tree_construction(bottom_nodes, query_workload, level_agents):
 
         while True:
             valid_actions = env.get_valid_actions()
-            action = agent.select_action(state, valid_actions)
+            action = global_agent.select_action(state, valid_actions)
             next_state, reward, done = env.step(action)
             total_reward += reward
 
-            # 应用论文终止条件
-            if total_reward <= -env.N or done:
+            if next_state is not None:
+                state = next_state
+            else:
                 break
-            state = next_state
 
         # 打印当前层级打包后的上层节点信息
         print(f"\nAfter final construction of Level {current_layer_level + 1}, upper_layer nodes:")
@@ -568,28 +592,50 @@ def final_tree_construction(bottom_nodes, query_workload, level_agents):
 ##########################################
 def build_nested_tree(tree_structure):
     """
-    假设 tree_structure 是 hierarchical_packing() 返回的分层列表，
-    且最后一层只有一个节点（树的根节点）。
-    则该函数将返回这个根节点，从而形成嵌套的树结构。
+    从底层向上构建嵌套的树结构
+    Args: tree_structure: 由层次结构组成的列表，每个元素是该层的节点列表
+    Returns:顶层的根节点列表（可能包含多个根节点）
     """
-    if not tree_structure:
+    if not tree_structure or len(tree_structure) == 0:
         return None
-        # 从底层向上逐层建立索引映射
-    for layer_idx in range(len(tree_structure) - 1, 0, -1):
-        current_layer = tree_structure[layer_idx]
-        lower_layer = tree_structure[layer_idx - 1]
+
+    # 从底层向上构建
+    for layer_idx in range(1, len(tree_structure)):
+        current_layer = tree_structure[layer_idx]  # 当前处理的层
+        lower_layer = tree_structure[layer_idx - 1]  # 下一层（子节点所在层）
 
         for node in current_layer:
-            # 将children中的索引替换为下层实际节点
-            node['children'] = [lower_layer[idx] for idx in node['children']]
+            if node['MBR'] is None:  # 跳过空节点
+                continue
 
-    # 返回顶层根节点
-    root_level = tree_structure[-1]
-    print_nested_tree(root_level)
-    if len(root_level) != 1:
-        print("Warning: the tree_structure has more than one root.")
-        return root_level
-    return root_level[0]
+            # 收集实际的子节点对象
+            real_children = []
+            for child_idx in node['children']:
+                # 确保索引有效
+                if isinstance(child_idx, int) and child_idx < len(lower_layer):
+                    child_node = lower_layer[child_idx]
+                    if child_node['MBR'] is not None:  # 只添加非空节点
+                        real_children.append(child_node)
+
+            # 更新节点的children字段为实际节点引用
+            node['children'] = real_children
+
+    # 获取顶层的所有非空节点作为根节点
+    root_nodes = [node for node in tree_structure[-1] if node['MBR'] is not None]
+
+    # 打印构建的嵌套树结构
+    print_nested_tree(root_nodes)
+
+    # 根据根节点数量返回适当的结果
+    if len(root_nodes) == 0:
+        print("警告：未找到有效的根节点。")
+        return None
+    elif len(root_nodes) == 1:
+        print(f"树结构有1个根节点。")
+        return root_nodes[0]  # 只有一个根节点时返回该节点
+    else:
+        print(f"树结构有{len(root_nodes)}个根节点。")
+        return root_nodes  # 多个根节点时返回节点列表
 
 def print_layer_nodes(nodes, layer_level):
     print(f"----- Layer {layer_level} Nodes Detail -----")
@@ -623,23 +669,48 @@ def print_tree_structure(tree_structure):
             print(f"  Node {i}: {children_count} children, {label_count} labels, MBR: {mbr_info}")
 
 
-def print_nested_tree(root_nodes, level=0):
+def print_nested_tree(root_nodes):
     """
-    递归打印构建好的嵌套树结构
-
-    Args:
-        root_node: build_nested_tree返回的根节点
-        level: 当前节点的层级（递归用）
+    打印构建好的嵌套树结构，只显示每层节点数
     """
     print("\n======= Nested Tree Structure =======")
-    # 检查root_nodes是否为列表
+
+    # 处理单个节点或节点列表
     if isinstance(root_nodes, list):
-        # 如果是列表，遍历每个节点
-        for node in root_nodes:
-            _print_node_recursive(node, level=0)
+        print(f"总共有 {len(root_nodes)} 个根节点")
+        for i, node in enumerate(root_nodes):
+            print(f"\n根节点 {i + 1}:")
+            # 用字典记录每层的节点数
+            layer_counts = {}
+            _count_nodes_by_layer(node, 0, layer_counts)
+
+            # 打印每层的节点数
+            for layer, count in sorted(layer_counts.items()):
+                print(f"Layer {layer}: {count} nodes")
     else:
-        # 如果是单个节点，直接递归打印
-        _print_node_recursive(root_nodes, level=0)
+        print("单一根节点树结构:")
+        layer_counts = {}
+        _count_nodes_by_layer(root_nodes, 0, layer_counts)
+
+        for layer, count in sorted(layer_counts.items()):
+            print(f"Layer {layer}: {count} nodes")
+
+
+def _count_nodes_by_layer(node, level, layer_counts):
+    """
+    递归辅助函数，统计每层的节点数
+    """
+    # 记录当前层的节点
+    layer = node.get('layer', level)
+    if layer not in layer_counts:
+        layer_counts[layer] = 0
+    layer_counts[layer] += 1
+
+    # 递归处理子节点
+    if 'children' in node and len(node['children']) > 0:
+        if isinstance(node['children'][0], dict):  # 子节点是对象
+            for child in node['children']:
+                _count_nodes_by_layer(child, level + 1, layer_counts)
 
 
 def _print_node_recursive(node, level=0):
