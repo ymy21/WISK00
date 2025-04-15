@@ -461,7 +461,7 @@ def hierarchical_packing_training(bottom_nodes, query_workload, max_level=20):
 ##########################################
 # 单层训练函数：训练 RL 代理以优化当前层的 packing 策略
 ##########################################
-def train_single_level(current_layer, query_workload, current_layer_level, agent, epochs=180):
+def train_single_level(current_layer, query_workload, current_layer_level, agent, epochs=500):
     # 添加数据验证
     if len(query_workload) == 0:
         raise ValueError("Query workload is empty")

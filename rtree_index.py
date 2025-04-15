@@ -15,7 +15,7 @@ class RTreeNode:
         self.is_leaf = is_leaf
         self.entries = []  # 如果是叶节点，每个 entry 为 (objects_list, mbr)；如果是内部节点，每个 entry 为子节点
         self.mbr = None  # 当前节点的最小外接矩形
-
+        self.keywords = [] # 节点包含的所有关键词
 
 def merge_mbr(mbr1, mbr2):
     """合并两个 MBR，返回新的 MBR"""
@@ -26,6 +26,13 @@ def merge_mbr(mbr1, mbr2):
         'max_lon': max(mbr1['max_lon'], mbr2['max_lon'])
     }
 
+def extract_keywords_from_objects(objects):
+    """从对象列表中提取所有唯一关键词"""
+    all_keywords = set()
+    for obj in objects:
+        if 'keywords' in obj:
+            all_keywords.update(obj['keywords'])
+    return list(all_keywords)
 
 def calculate_mbr_for_objects(objects):
     """计算一组对象的MBR"""
@@ -141,6 +148,7 @@ def build_rtree_with_grouped_objects(avg_object, objects, wisk_index, max_entrie
         leaf = RTreeNode(is_leaf=True)
         leaf.entries.append((group, mbr))
         leaf.mbr = mbr
+        leaf.keywords = extract_keywords_from_objects(group)
         leaves.append(leaf)
 
     # 构建内部节点层次
@@ -155,6 +163,11 @@ def build_rtree_with_grouped_objects(avg_object, objects, wisk_index, max_entrie
             for child in group[1:]:
                 parent_mbr = merge_mbr(parent_mbr, child.mbr)
             parent.mbr = parent_mbr
+            # 合并子节点的关键词
+            all_keywords = set()
+            for child in group:
+                all_keywords.update(child.keywords)
+            parent.keywords = list(all_keywords)
             new_level.append(parent)
         nodes = new_level
 
@@ -170,22 +183,29 @@ def search_rtree(query_rect, query_keywords, node, node_counter, obj_counter=Non
     node_counter[0] += 1  # 访问当前节点
     results = []
 
+    # 首先检查当前节点的MBR与查询区域是否相交
+    if not mbr_intersect(node.mbr, query_rect):
+        return results
+
+    # 检查当前节点的关键词与查询关键词是否有交集
+    if not keyword_intersect(node.keywords, query_keywords):
+        return results
+
     if node.is_leaf:
         for objects_list, obj_mbr in node.entries:
-            if mbr_intersect(obj_mbr, query_rect):
-                # 找到相交的叶子节点，检查每个对象
-                for obj in objects_list:
-                    # 如果提供了obj_counter，增加对象扫描计数
-                    if obj_counter is not None:
-                        obj_counter[0] += 1
+            # 已经在上面检查过MBR和关键词，这里直接处理对象
+            for obj in objects_list:
+                # 计数已扫描对象
+                if obj_counter is not None:
+                    obj_counter[0] += 1
 
-                    # 检查对象关键词是否与查询关键词有交集
-                    if keyword_intersect(obj.get('keywords', []), query_keywords):
-                        results.append(obj)
+                # 检查单个对象是否符合条件
+                if keyword_intersect(obj.get('keywords', []), query_keywords):
+                    results.append(obj)
     else:
+        # 非叶子节点，递归搜索子节点
         for child in node.entries:
-            if mbr_intersect(child.mbr, query_rect):
-                results.extend(search_rtree(query_rect, query_keywords, child, node_counter, obj_counter))
+            results.extend(search_rtree(query_rect, query_keywords, child, node_counter, obj_counter))
 
     return results
 
