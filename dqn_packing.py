@@ -13,20 +13,29 @@ print("Using device:", device)
 ##########################################
 class PackingEnv:
     def __init__(self, current_layer_nodes, query_workload, current_layer_level):
-
         if not current_layer_nodes:
             raise ValueError("current_layer_nodes cannot be empty")
-        self.current_layer = current_layer_nodes  # 当前层待打包节点
+        self.current_layer = current_layer_nodes
         self.query_workload = query_workload
         self.m = len(query_workload)
-        self.N = len(current_layer_nodes)  # 下层节点数量，决定预创建上层节点的数量
-        self.current_layer_level = current_layer_level #当前层号
+        self.N = len(current_layer_nodes)
+        self.current_layer_level = current_layer_level
 
-        # 预先创建 N 个空的上层节点（固定数量），非叶节点采用 bitmap 存储关键词信息
+        # 预计算查询区域边界
+        self.query_areas = []
+        for query in query_workload:
+            self.query_areas.append({
+                'min_lat': query['area']['min_lat'],
+                'max_lat': query['area']['max_lat'],
+                'min_lon': query['area']['min_lon'],
+                'max_lon': query['area']['max_lon'],
+                'keywords': set(query['keywords'])
+            })
+
+        # 预先创建上层节点
         self.upper_layer = []
         for i in range(self.N):
-            # 每个上层节点赋予临时 id（层号后续在主流程中更新）
-            node = {'id': i, 'layer': self.current_layer_level+1, 'labels': [], 'children': [], 'MBR': None}
+            node = {'id': i, 'layer': self.current_layer_level + 1, 'labels': [], 'children': [], 'MBR': None}
             self.upper_layer.append(node)
 
         self.current_step = 0
@@ -34,87 +43,95 @@ class PackingEnv:
             self.current_node = self.current_layer[self.current_step]
         else:
             self.current_node = None
-        # 添加累积奖励跟踪
         self.total_reward = 0.0
 
-    def _mbr_intersect(self, mbr, query):
-        """
-        判断 mbr（字典形式，包含 'min_lat', 'max_lat', 'min_lon', 'max_lon'）是否与 query 的区域相交。
-        这里 query 包含一个 'area' 键，其值为包含边界信息的字典。
-        """
-        area = query['area']
-        return not (
-                mbr['max_lat'] < area['min_lat'] or
-                mbr['min_lat'] > area['max_lat'] or
-                mbr['max_lon'] < area['min_lon'] or
-                mbr['min_lon'] > area['max_lon']
+        # 缓存以加速计算
+        self._intersect_cache = {}
+        self._keyword_match_cache = {}
+
+    def _mbr_intersect(self, mbr, query_area):
+        """优化的MBR交集计算，使用缓存"""
+        # 创建缓存键
+        cache_key = (
+            mbr.get('min_lat', float('inf')),
+            mbr.get('max_lat', float('-inf')),
+            mbr.get('min_lon', float('inf')),
+            mbr.get('max_lon', float('-inf')),
+            query_area['min_lat'],
+            query_area['max_lat'],
+            query_area['min_lon'],
+            query_area['max_lon']
         )
 
+        # 检查缓存
+        if cache_key in self._intersect_cache:
+            return self._intersect_cache[cache_key]
+
+        # 计算交集
+        result = not (
+                mbr['max_lat'] < query_area['min_lat'] or
+                mbr['min_lat'] > query_area['max_lat'] or
+                mbr['max_lon'] < query_area['min_lon'] or
+                mbr['min_lon'] > query_area['max_lon']
+        )
+
+        # 存入缓存
+        self._intersect_cache[cache_key] = result
+        return result
+
     def _get_state(self):
-        """
-        生成状态向量，总维度为 ((m+1)*N + m)：
-          - 对于每个预先创建的上层节点（固定 N 个），前 m 个维度表示该节点对各查询的匹配情况，
-            匹配条件为：若该节点的标签中包含查询的任一关键词且其 MBR 与查询区域相交，则置为1，否则为0。
-          - 紧跟其后的一维表示该节点已连接的底层节点数。
-          - 最后追加 m 个维度用于表示下一底层节点的信息（因为当前底层节点排列在列表中）。
-        """
+        """优化的状态向量生成，使用向量化操作"""
         state_dim = (self.m + 1) * self.N + self.m
-        state = np.zeros(state_dim)
+        state = np.zeros(state_dim, dtype=np.float32)
 
-        # 对每个上层节点，填充关键词匹配（考虑 mbr 是否相交且至少有一个关键词在query中）和孩子节点数量
+        # 预计算当前所有上层节点的关键词集合
+        node_keywords = []
+        for node in self.upper_layer:
+            node_keywords.append(set(node['labels']))
+
+        # 并行计算所有节点对所有查询的匹配情况
         for i, node in enumerate(self.upper_layer):
-            # 跳过空节点但保留位置（论文要求固定N个节点）
-            if node['MBR'] is not None:
-                for j, query in enumerate(self.query_workload):
-                    # 如果该上层节点标签中包含 query 中任一关键词，并且其 MBR存在且与 query 区域相交，则匹配置1
-                    spatial_intersect = self._mbr_intersect(node['MBR'], query)
-                    keyword_intersect = any(kw in node['labels'] for kw in query['keywords'])
-                    state[i * (self.m + 1) + j] = 1 if (spatial_intersect and keyword_intersect) else 0
-                # 孩子节点数量
-                state[i * (self.m + 1) + self.m] = len(node['children'])#最底层是cluster得来的，children有很多，不能设为0
+            if node['MBR'] is None:
+                continue  # 跳过空节点
 
-        # 保存下一底层节点的信息
+            # 优化：批量计算所有查询的空间和关键词匹配
+            for j, query_area in enumerate(self.query_areas):
+                # 缓存节点-查询的关键词匹配结果
+                kw_cache_key = (i, j)
+                if kw_cache_key not in self._keyword_match_cache:
+                    self._keyword_match_cache[kw_cache_key] = bool(node_keywords[i] & query_area['keywords'])
+
+                # 空间和关键词都匹配才设置为1
+                if (node['MBR'] is not None and
+                        self._mbr_intersect(node['MBR'], query_area) and
+                        self._keyword_match_cache[kw_cache_key]):
+                    state[i * (self.m + 1) + j] = 1
+
+            # 设置孩子节点数量
+            state[i * (self.m + 1) + self.m] = len(node['children'])
+
+        # 下一底层节点信息
         if self.current_step + 1 < len(self.current_layer):
             next_node = self.current_layer[self.current_step + 1]
-            for j, query in enumerate(self.query_workload):
-                next_node_spatial = self._mbr_intersect(next_node['MBR'], query) if next_node['MBR'] else False
-                next_node_keyword = any(kw in next_node['labels'] for kw in query['keywords'])
-                state[self.N * (self.m + 1) + j] = 1 if (next_node_spatial and next_node_keyword) else 0
+            next_node_keywords = set(next_node['labels']) if next_node.get('labels') else set()
 
-        else:
-            # 如果没有下一底层节点，则后面的 m 维置为0
-            for j in range(self.m):
-                state[self.N * (self.m + 1) + j] = 0
+            for j, query_area in enumerate(self.query_areas):
+                # 空间和关键词匹配
+                next_node_spatial = self._mbr_intersect(next_node['MBR'], query_area) if next_node.get('MBR') else False
+                next_node_keyword = bool(next_node_keywords & query_area['keywords'])
+
+                if next_node_spatial and next_node_keyword:
+                    state[self.N * (self.m + 1) + j] = 1
 
         return state
 
-    def get_action_mask(self):
-        mask = [False] * self.N
-        # 找到所有空节点的索引（即 children 为空的节点）
-        empty_indices = [i for i, node in enumerate(self.upper_layer) if node['MBR'] is None]
-        if empty_indices:
-            # 仅允许第一个空节点
-            mask[empty_indices[0]] = True
-            # 对于非空节点，允许选择
-            for i, node in enumerate(self.upper_layer):
-                if node['MBR'] is not None:
-                    mask[i] = True
-        else:
-            mask = [True] * self.N
-        return mask
-
-    def get_valid_actions(self):
-        mask = self.get_action_mask()
-        """直接返回布尔掩码列表（而非索引列表）"""
-        return mask
-
     def step(self, action):
+        """环境步进函数，优化MBR计算和缓存失效处理"""
         done = False
         prev_access = self._calculate_access_cost()
-        # 之前会出现节点增加的原因；下层的空节点也会参与打包
-        # 跳过下层中 MBR 为空的节点（空节点不打包）
+
+        # 跳过空节点
         while self.current_node is not None and self.current_node['MBR'] is None:
-            #print(f"Skipping empty lower node at index {self.current_step}")
             self.current_step += 1
             if self.current_step < len(self.current_layer):
                 self.current_node = self.current_layer[self.current_step]
@@ -124,18 +141,35 @@ class PackingEnv:
 
         # 将当前底层节点合并到选定的上层节点
         target = self.upper_layer[action]
+
+        # 当目标节点变化时，使相关缓存失效
+        for key in list(self._keyword_match_cache.keys()):
+            if key[0] == action:
+                del self._keyword_match_cache[key]
+
+        # 更新目标节点
         current_labels = list(self.current_node['labels'])
         target['labels'] = list(set(target['labels'] + current_labels))
-        # 只存储下层节点的 index，而非整个节点内容
         target['children'].append(self.current_step)
 
-        # 如果当前底层节点非空，更新目标节点的 MBR
+        # 更新MBR
         if self.current_node['MBR'] is not None:
             if target['MBR'] is None:
-                target['MBR'] = self.current_node['MBR']
+                target['MBR'] = self.current_node['MBR'].copy()  # 创建副本避免引用问题
             else:
+                # MBR发生变化，清理相关的交集缓存
+                old_mbr = (target['MBR']['min_lat'], target['MBR']['max_lat'],
+                           target['MBR']['min_lon'], target['MBR']['max_lon'])
+
+                # 更新MBR
                 target['MBR'] = self._merge_mbr(target['MBR'], self.current_node['MBR'])
 
+                # 清理受影响的缓存项
+                for key in list(self._intersect_cache.keys()):
+                    if key[0:4] == old_mbr:
+                        del self._intersect_cache[key]
+
+        # 前进到下一步
         self.current_step += 1
         if self.current_step >= len(self.current_layer):
             done = True
@@ -145,80 +179,57 @@ class PackingEnv:
             next_state = self._get_state()
 
         new_access = self._calculate_access_cost()
-        # 采用平均每个查询节点访问数减少作为 reward
-        # 计算并应用奖励缩放，提高训练稳定性
         reward = prev_access - new_access
-
-        # 更新累积奖励，用于终止条件判断
         self.total_reward += reward
 
-        # # 应用论文终止条件：如果累积奖励不大于-N，提前终止
-        # if self.total_reward <= -self.N:
-        #     done = True
         if done and (new_access > self.N):
             done = True
             print("终止条件触发：当前访问节点数大于初始访问节点数")
+
         return next_state, reward, done
 
     def _calculate_access_cost(self):
-        """
-        计算所有查询的平均节点访问数。
-        对于每个查询，我们计算：
-        1. 需要访问的非空上层节点数量
-        2. 当上层节点与查询匹配时，还需要访问其子节点
-        3. 未打包的下层节点直接计入访问成本
-        """
+        """优化的访问成本计算"""
         total_access = 0
 
-        for query in self.query_workload:
+        # 预计算每个查询的总访问成本
+        for query_idx, query in enumerate(self.query_workload):
+            query_area = self.query_areas[query_idx]
             query_access = 0
 
             # 上层节点部分
-            for node in self.upper_layer:
-                # 跳过空节点
+            for node_idx, node in enumerate(self.upper_layer):
                 if node['MBR'] is None:
                     continue
 
-                # 每个非空上层节点都需要访问一次
-                query_access += 1  # 基本访问成本
+                # 基本访问成本
+                query_access += 1
 
-                # 如果节点与查询匹配，还需要访问其子节点
-                if self._mbr_intersect(node['MBR'], query) and any(kw in node['labels'] for kw in query['keywords']):
-                    # 每个子节点的访问成本
+                # 检查匹配并计算子节点访问
+                if self._mbr_intersect(node['MBR'], query_area) and any(
+                        kw in node['labels'] for kw in query['keywords']):
                     query_access += len(node['children'])
 
-            # 下层部分：未打包的节点
+            # 未打包节点部分
             for i in range(self.current_step, len(self.current_layer)):
                 if self.current_layer[i]['MBR'] is not None:
-                    query_access += 1  # 未打包节点的访问成本
-                    #
-                    # # 如果节点与查询匹配，计算验证成本
-                    # if self._mbr_intersect(self.current_layer[i]['MBR'], query) and any(
-                    #         kw in self.current_layer[i]['labels'] for kw in query['keywords']):
-                    #     query_access += self.w2  # 验证成本
+                    query_access += 1
 
             total_access += query_access
 
-        # 返回平均每个查询的访问成本
         return total_access / len(self.query_workload)
 
-
-    def _merge_mbr(self, mbr1, mbr2):
-        return {
-            'min_lat': min(mbr1['min_lat'], mbr2['min_lat']),
-            'max_lat': max(mbr1['max_lat'], mbr2['max_lat']),
-            'min_lon': min(mbr1['min_lon'], mbr2['min_lon']),
-            'max_lon': max(mbr1['max_lon'], mbr2['max_lon'])
-        }
-
     def reset(self):
+        """重置环境状态"""
         self.current_step = 0
         if self.current_layer:
             self.current_node = self.current_layer[self.current_step]
         else:
             self.current_node = None
-        # 重置累积奖励
         self.total_reward = 0.0
+        # 清空缓存
+        self._intersect_cache = {}
+        self._keyword_match_cache = {}
         return self._get_state()
 
 
@@ -250,82 +261,104 @@ class DQNAgent:
         self.state_dim = state_dim
         self.action_dim = action_dim
 
+        # 创建策略网络和目标网络并移至GPU
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.policy_net = DQN(state_dim, action_dim).to(device)
         self.target_net = DQN(state_dim, action_dim).to(device)
         self.target_net.load_state_dict(self.policy_net.state_dict())
 
+        # 优化器设置
         self.optimizer = torch.optim.Adam(self.policy_net.parameters(), lr=lr)
 
-        self.memory = deque(maxlen=256) #根据论文设定
-        self.batch_size = 64
+        # 增大内存缓冲区和批大小
+        self.memory = deque(maxlen=512)
+        self.batch_size = 128
         self.gamma = gamma
 
         self.epsilon = 1.0
         self.epsilon_min = 0.01
         self.epsilon_decay = 0.995
 
-        # 添加epsilon衰减计数器
         self.epsilon_update_counter = 0
-        self.epsilon_update_freq = 10  # 每10个epoch更新一次epsilon
+        self.epsilon_update_freq = 10
 
-        # 添加步数计数和目标网络更新频率
         self.steps_done = 0
-        self.target_update_freq = 10  # 每10步更新一次
+        self.target_update_freq = 10
+
+        # 预分配张量，避免频繁创建
+        self.device = device
+        self.actions_tensor = torch.zeros(self.batch_size, dtype=torch.long, device=device)
 
     def select_action(self, state, valid_actions):
-        state_tensor = torch.FloatTensor(state).unsqueeze(0).to(device)
+        """选择动作，使用GPU加速"""
+        state_tensor = torch.FloatTensor(state).to(self.device)
+
         if random.random() < self.epsilon:
             # 在合法动作中随机选择
             valid_indices = [i for i, valid in enumerate(valid_actions) if valid]
             return random.choice(valid_indices)
         else:
             with torch.no_grad():
-                q_values = self.policy_net(state_tensor)[0]  # 一次前向传播得到所有动作的 Q 值
-            # 将非法动作的 Q 值设为负无穷，确保不会被选中
-            # 应用动作掩码
-            mask = torch.tensor(valid_actions, dtype=torch.bool, device=device)
-            valid_q = torch.where(mask, q_values, torch.tensor(-float('inf'), device=device))
-            return valid_q.argmax().item()
+                q_values = self.policy_net(state_tensor)
+                mask = torch.tensor(valid_actions, dtype=torch.bool, device=self.device)
+                valid_q = torch.where(mask, q_values, torch.tensor(-float('inf'), device=self.device))
+                return valid_q.argmax().item()
 
     def store_transition(self, state, action, reward, next_state):
+        """存储经验到回放缓冲区"""
         self.memory.append((state, action, reward, next_state))
 
     def update_model(self):
+        """批量更新模型参数，使用GPU加速"""
         if len(self.memory) < self.batch_size:
-            return 0.0, 0.0, 0.0 # 返回loss, max_q, min_q
-        # 计数更新步数
+            return 0.0, 0.0, 0.0
+
         self.steps_done += 1
-#for
-        # 增加多次训练循环，每次打包一个节点可以训练多次
+
+        # 多次训练，保持训练次数不变
         avg_loss = 0.0
         avg_max_q = 0.0
         avg_min_q = 0.0
-        training_iterations = 50  # 每次打包后训练多次网络
+        training_iterations = 50
 
         for _ in range(training_iterations):
+            # 采样批量经验
             batch = random.sample(self.memory, self.batch_size)
             states, actions, rewards, next_states = zip(*batch)
 
-            states = torch.FloatTensor(np.array(states)).to(device)
-            actions = torch.LongTensor(actions).to(device)
-            rewards = torch.FloatTensor(rewards).to(device)
+            # 将数组转换为张量并移至GPU
+            states_tensor = torch.FloatTensor(np.array(states)).to(self.device)
+            actions_tensor = self.actions_tensor
+            for i, a in enumerate(actions):
+                actions_tensor[i] = a
+            rewards_tensor = torch.FloatTensor(rewards).to(self.device)
 
             # 处理非终止状态
-            non_final_mask = torch.tensor([s is not None for s in next_states], dtype=torch.bool, device=device)
-            non_final_next_states = torch.FloatTensor(np.array([s for s in next_states if s is not None])).to(device)
+            non_final_mask = torch.tensor([s is not None for s in next_states], dtype=torch.bool, device=self.device)
+            non_final_next_states = torch.FloatTensor(np.array([s for s in next_states if s is not None])).to(
+                self.device)
 
-            # 计算当前 Q 值
-            current_q = self.policy_net(states).gather(1, actions.unsqueeze(1)).squeeze(1)
+            # 计算当前Q值和下一状态的最大Q值
+            all_q_values = self.policy_net(states_tensor)
+            current_q = all_q_values.gather(1, actions_tensor.unsqueeze(1)).squeeze(1)
+
+            # 使用目标网络计算下一状态的最大Q值
+            next_q = torch.zeros(self.batch_size, device=self.device)
+            if non_final_mask.sum() > 0:
+                with torch.no_grad():
+                    next_state_values = self.target_net(non_final_next_states).max(1)[0]
+                next_q[non_final_mask] = next_state_values
 
             # 计算目标Q值
-            next_q = torch.zeros(self.batch_size, device=device)
-            if non_final_mask.sum() > 0:
-                next_q[non_final_mask] = self.target_net(non_final_next_states).max(1)[0].detach()
-            target_q = rewards + self.gamma * next_q
+            target_q = rewards_tensor + self.gamma * next_q
 
+            # 使用MSE损失函数
             loss = nn.MSELoss()(current_q, target_q)
+
+            # 更新模型
             self.optimizer.zero_grad()
             loss.backward()
+
             # 梯度裁剪，防止梯度爆炸
             torch.nn.utils.clip_grad_norm_(self.policy_net.parameters(), max_norm=1.0)
             self.optimizer.step()
@@ -336,7 +369,7 @@ class DQNAgent:
                 avg_max_q += current_q.max().item()
                 avg_min_q += current_q.min().item()
 
-        # 每C步更新一次目标网络
+        # 使用软更新目标网络
         if self.steps_done % self.target_update_freq == 0:
             self.soft_update_target()
 
@@ -344,11 +377,12 @@ class DQNAgent:
         return avg_loss / training_iterations, avg_max_q / training_iterations, avg_min_q / training_iterations
 
     def soft_update_target(self, tau=0.001):
+        """软更新目标网络参数"""
         for target_param, policy_param in zip(self.target_net.parameters(), self.policy_net.parameters()):
             target_param.data.copy_(tau * policy_param.data + (1 - tau) * target_param.data)
 
     def update_epsilon(self):
-        """在每个epoch结束后调用，控制epsilon的衰减频率"""
+        """控制探索率的衰减"""
         self.epsilon_update_counter += 1
         if self.epsilon_update_counter >= self.epsilon_update_freq:
             self.epsilon = max(self.epsilon_min, self.epsilon * self.epsilon_decay)
@@ -462,17 +496,24 @@ def hierarchical_packing_training(bottom_nodes, query_workload, max_level=20):
 # 单层训练函数：训练 RL 代理以优化当前层的 packing 策略
 ##########################################
 def train_single_level(current_layer, query_workload, current_layer_level, agent, epochs=500):
-    # 添加数据验证
+    """优化的单层训练函数"""
     if len(query_workload) == 0:
         raise ValueError("Query workload is empty")
     if len(current_layer) == 0:
         raise ValueError("Current layer nodes are empty")
 
-    total_rewards = []  # 记录每轮训练的总奖励
-    loss_history = []  # 新增loss记录
-    q_values = []  # 新增Q值记录
+    total_rewards = []
+    loss_history = []
+    q_values = []
 
-    for epoch in range(epochs):
+    # 可选：使用tqdm显示进度条
+    try:
+        from tqdm import tqdm
+        epoch_iterator = tqdm(range(epochs), desc=f"Training Level {current_layer_level + 1}")
+    except ImportError:
+        epoch_iterator = range(epochs)
+
+    for epoch in epoch_iterator:
         env = PackingEnv(current_layer, query_workload, current_layer_level)
         state = env.reset()
         total_reward = 0
@@ -481,16 +522,15 @@ def train_single_level(current_layer, query_workload, current_layer_level, agent
         epoch_max_q = []
         epoch_min_q = []
 
+        # 环境交互和训练循环
         while not done:
-            valid_actions = env.get_valid_actions() # 获取布尔掩码
+            valid_actions = env.get_valid_actions()
             action = agent.select_action(state, valid_actions)
             next_state, reward, done = env.step(action)
 
             total_reward += reward
-            # if total_reward <= -env.N:  # 论文条件
-            #     done = True
 
-            # 存储经验
+            # 存储经验并训练
             if next_state is not None:
                 agent.store_transition(state, action, reward, next_state)
                 loss, max_q, min_q = agent.update_model()
@@ -501,7 +541,8 @@ def train_single_level(current_layer, query_workload, current_layer_level, agent
                 state = next_state
             else:
                 break
-        # 在每个epoch结束后更新epsilon
+
+        # 更新探索率
         agent.update_epsilon()
 
         # 记录统计量
@@ -511,9 +552,12 @@ def train_single_level(current_layer, query_workload, current_layer_level, agent
         loss_history.append(avg_loss)
         q_values.append((avg_max_q, avg_min_q))
         total_rewards.append(total_reward)
-        # 修改打印语句
-        print(f"Epoch {epoch + 1} | ε={agent.epsilon:.3f} | Loss: {avg_loss:.2f} | "
+
+        # 每10个epoch打印一次信息
+        if epoch % 10 == 0 or epoch == epochs - 1:
+            print(f"Epoch {epoch + 1} | ε={agent.epsilon:.3f} | Loss: {avg_loss:.2f} | "
                   f"Q(max/min): {avg_max_q:.2f}/{avg_min_q:.2f} | Reward: {total_reward:.2f}")
+
 
         # print(f"Epoch {epoch + 1} | ε={agent.epsilon:.3f} | Total Reward: {total_reward:.2f}")
         # 添加监控曲线绘制
