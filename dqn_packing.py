@@ -125,6 +125,26 @@ class PackingEnv:
 
         return state
 
+    def get_action_mask(self):
+        mask = [False] * self.N
+        # 找到所有空节点的索引（即 children 为空的节点）
+        empty_indices = [i for i, node in enumerate(self.upper_layer) if node['MBR'] is None]
+        if empty_indices:
+            # 仅允许第一个空节点
+            mask[empty_indices[0]] = True
+            # 对于非空节点，允许选择
+            for i, node in enumerate(self.upper_layer):
+                if node['MBR'] is not None:
+                    mask[i] = True
+        else:
+            mask = [True] * self.N
+        return mask
+
+    def get_valid_actions(self):
+        mask = self.get_action_mask()
+        """直接返回布尔掩码列表（而非索引列表）"""
+        return mask
+
     def step(self, action):
         """环境步进函数，优化MBR计算和缓存失效处理"""
         done = False
@@ -189,7 +209,13 @@ class PackingEnv:
         return next_state, reward, done
 
     def _calculate_access_cost(self):
-        """优化的访问成本计算"""
+        """
+        计算所有查询的平均节点访问数。
+        对于每个查询，我们计算：
+        1. 需要访问的非空上层节点数量
+        2. 当上层节点与查询匹配时，还需要访问其子节点
+        3. 未打包的下层节点直接计入访问成本
+        """
         total_access = 0
 
         # 预计算每个查询的总访问成本
@@ -218,6 +244,14 @@ class PackingEnv:
             total_access += query_access
 
         return total_access / len(self.query_workload)
+
+    def _merge_mbr(self, mbr1, mbr2):
+        return {
+            'min_lat': min(mbr1['min_lat'], mbr2['min_lat']),
+            'max_lat': max(mbr1['max_lat'], mbr2['max_lat']),
+            'min_lon': min(mbr1['min_lon'], mbr2['min_lon']),
+            'max_lon': max(mbr1['max_lon'], mbr2['max_lon'])
+        }
 
     def reset(self):
         """重置环境状态"""
@@ -542,7 +576,7 @@ def train_single_level(current_layer, query_workload, current_layer_level, agent
             else:
                 break
 
-        # 更新探索率
+        # 在每个epoch结束后更新探索率
         agent.update_epsilon()
 
         # 记录统计量
