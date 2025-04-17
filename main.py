@@ -22,9 +22,9 @@ def main():
     # 1. 准备数据
     print("Loading real dataset and generating query workload...")
     file_path = "dataset/dataset_TSMC2014_NYC.txt"  # 更新为真实数据集的路径
-    num_object = 500
+    num_object = 200
     data = load_real_dataset(file_path, num_objects=num_object)
-    num_query = 250
+    num_query = 100
     query_workload = generate_query_workload(data, num_queries=num_query, num_keywords=5, buffer=0.01)
     print("Dataset and query workload generated.")
 

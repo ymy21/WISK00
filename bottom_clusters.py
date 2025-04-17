@@ -6,7 +6,6 @@ import pandas as pd
 from scipy.stats import norm
 from collections import defaultdict
 
-
 class PriorityQueue:
     def __init__(self, query_workload, max_size=1000):
         self.queue = []
@@ -32,7 +31,7 @@ class PriorityQueue:
 class LeafNode:
     """Leaf node for WISK tree containing objects and inverted file index"""
 
-    def __init__(self, layer, mbr, objects, node_id=None):
+    def __init__(self, layer,mbr, objects, node_id=None):
         self.mbr = mbr  # {min_lat, max_lat, min_lon, max_lon}
         self.is_leaf = True
         self.objects = objects
@@ -72,60 +71,65 @@ class LeafNode:
             'id': self.id
         }
 
+# def calculate_intersecting_queries(subspace, query_workload):
+#     count = 0
+#     #print(f"subspace: {subspace}, type: {type(subspace)}")
+#     if not subspace.get('labels'):  # 无关键词的子空间直接过滤
+#         print(f"子空间无关键词labels。")
+#         return 0
+#     subspace_keywords = subspace.get('labels', set())
+#     for query in query_workload:
+#         # 检查空间交集
+#         spatial_intersect = (
+#                 subspace['min_lat'] <= query['area']['max_lat'] and
+#                 subspace['max_lat'] >= query['area']['min_lat'] and
+#                 subspace['min_lon'] <= query['area']['max_lon'] and
+#                 subspace['max_lon'] >= query['area']['min_lon']
+#         )
+#         # 检查关键词交集（使用集合操作）
+#         keyword_intersect = bool(set(query['keywords']) & subspace_keywords)
+#
+#         if spatial_intersect and keyword_intersect:
+#             count += 1
+#     return count
 
-# 优化的交叉查询计算函数
-def calculate_intersecting_queries_gpu(subspace, query_workload):
-    # 如果是GPU可用，则使用GPU加速
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+def calculate_intersecting_queries(subspace, query_workload):
+    count = 0
 
-    # 获取子空间信息
-    if isinstance(subspace, dict):  # 旧格式
+    # Handle different node types
+    if isinstance(subspace, dict):  # Old format
         if not subspace.get('labels'):
+            print(f"子空间无关键词labels。")
             return 0
-        subspace_keywords = set(subspace.get('labels', []))
+        subspace_keywords = subspace.get('labels', set())
         mbr = {
             'min_lat': subspace['min_lat'],
             'max_lat': subspace['max_lat'],
             'min_lon': subspace['min_lon'],
             'max_lon': subspace['max_lon']
         }
-    elif isinstance(subspace, LeafNode):  # 新LeafNode格式
+    elif isinstance(subspace, LeafNode):  # New LeafNode format
         subspace_keywords = subspace.get_keywords()
         mbr = subspace.mbr
     else:
+        print(f"Unknown subspace type: {type(subspace)}")
         return 0
 
-    # 预计算所有查询边界
-    query_mins = torch.tensor([[q['area']['min_lat'], q['area']['min_lon']]
-                               for q in query_workload], device=device)
-    query_maxs = torch.tensor([[q['area']['max_lat'], q['area']['max_lon']]
-                               for q in query_workload], device=device)
+    for query in query_workload:
+        # 检查空间交集
+        query_mbr = query['area']
+        spatial_intersect = (
+                mbr['min_lat'] <= query_mbr['max_lat'] and
+                mbr['max_lat'] >= query_mbr['min_lat'] and
+                mbr['min_lon'] <= query_mbr['max_lon'] and
+                mbr['max_lon'] >= query_mbr['min_lon']
+        )
+        # 检查关键词交集（使用集合操作）
+        keyword_intersect = bool(set(query['keywords']) & subspace_keywords)
 
-    # 子空间边界转为tensor
-    subspace_min = torch.tensor([mbr['min_lat'], mbr['min_lon']], device=device)
-    subspace_max = torch.tensor([mbr['max_lat'], mbr['max_lon']], device=device)
-
-    # 并行计算所有查询的空间交集
-    spatial_intersect = (
-            (subspace_min[0] <= query_maxs[:, 0]) &
-            (subspace_max[0] >= query_mins[:, 0]) &
-            (subspace_min[1] <= query_maxs[:, 1]) &
-            (subspace_max[1] >= query_mins[:, 1])
-    )
-
-    # 统计同时具有空间交集和关键词交集的查询
-    count = 0
-    for i, query in enumerate(query_workload):
-        if spatial_intersect[i].item() and bool(set(query['keywords']) & subspace_keywords):
+        if spatial_intersect and keyword_intersect:
             count += 1
-
     return count
-
-
-# 保留原有函数作为兼容模式
-def calculate_intersecting_queries(subspace, query_workload):
-    return calculate_intersecting_queries_gpu(subspace, query_workload)
-
 
 def generate_subspace(subspace, dim, split_value):
     # 动态计算最小尺寸（避免绝对阈值）
@@ -139,27 +143,20 @@ def generate_subspace(subspace, dim, split_value):
     if dim == 0:
         if (split_value - subspace['min_lat'] < dynamic_min_size) or \
                 (subspace['max_lat'] - split_value < dynamic_min_size):
+            print(f"reach min size")
             return None, None
     else:
         if (split_value - subspace['min_lon'] < dynamic_min_size) or \
                 (subspace['max_lon'] - split_value < dynamic_min_size):
+            print(f"reach min size")
             return None, None
 
-    # 分割对象 - 使用NumPy向量化操作加速
+    # 分割对象
     left_objects = []
     right_objects = []
-
-    # 使用NumPy加速数组操作
-    if dim == 0:
-        coords = np.array([obj['latitude'] for obj in subspace['objects']])
-        left_mask = coords < split_value
-    else:
-        coords = np.array([obj['longitude'] for obj in subspace['objects']])
-        left_mask = coords < split_value
-
-    # 根据掩码分配对象
-    for i, obj in enumerate(subspace['objects']):
-        if left_mask[i]:
+    for obj in subspace['objects']:
+        if (dim == 0 and obj['latitude'] < split_value) or \
+                (dim == 1 and obj['longitude'] < split_value):
             left_objects.append(obj)
         else:
             right_objects.append(obj)
@@ -174,79 +171,154 @@ def generate_subspace(subspace, dim, split_value):
         for obj in objects:
             keywords.update(obj['keywords'])
 
-        # 计算空间边界 - 使用NumPy加速
-        if len(objects) > 0:
-            lats = np.array([obj['latitude'] for obj in objects])
-            lons = np.array([obj['longitude'] for obj in objects])
+        # 计算空间边界
+        lats = [obj['latitude'] for obj in objects]
+        lons = [obj['longitude'] for obj in objects]
 
-            return {
-                'min_lat': np.min(lats),
-                'max_lat': np.max(lats),
-                'min_lon': np.min(lons),
-                'max_lon': np.max(lons),
-                'objects': objects,
-                'labels': keywords
-            }
-        return None
+        return {
+            'min_lat': min(lats),
+            'max_lat': max(lats),
+            'min_lon': min(lons),
+            'max_lon': max(lons),
+            'objects': objects,
+            'labels': keywords
+        }
 
     left_sub = create_subspace(left_objects)
     right_sub = create_subspace(right_objects)
     return left_sub, right_sub
 
 
-# 优化的SGD学习函数
-def SGDLearn_optimized(subspace, dim, query_workload, cdf_models, epochs=8, lr=0.02):
-    # 使用GPU加速
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
+def SGDLearn(subspace, dim, query_workload, cdf_models, epochs=15, lr=0.01):
     # 初始分割点
     initial_value = subspace['min_lat'] + (subspace['max_lat'] - subspace['min_lat']) / 2 if dim == 0 \
         else subspace['min_lon'] + (subspace['max_lon'] - subspace['min_lon']) / 2
-    split_value = torch.tensor([initial_value], dtype=torch.float32, device=device, requires_grad=True)
-
-    # 使用Adam优化器
+    split_value = torch.tensor([initial_value], dtype=torch.float32, requires_grad=True)
     optimizer = torch.optim.Adam([split_value], lr=lr)
 
     best_cost = float('inf')
     best_split = initial_value
-    sigmoid = torch.nn.Sigmoid().to(device)
-
-    # 预计算子空间边界
+    sigmoid = torch.sigmoid
     if dim == 0:
-        subspace_below = torch.tensor(subspace['min_lat'], dtype=torch.float32, device=device)
-        subspace_up = torch.tensor(subspace['max_lat'], dtype=torch.float32, device=device)
+        subspace_below = subspace['min_lat']
+        subspace_up = subspace['max_lat']
     else:
-        subspace_below = torch.tensor(subspace['min_lon'], dtype=torch.float32, device=device)
-        subspace_up = torch.tensor(subspace['max_lon'], dtype=torch.float32, device=device)
+        subspace_below = subspace['min_lon']
+        subspace_up = subspace['max_lon']
 
-    # 预处理查询数据，将查询的边界转换为GPU张量
-    query_boundaries = []
-    for query in query_workload:
-        if dim == 0:
-            query_boundaries.append([query['area']['min_lat'], query['area']['max_lat']])
-        else:
-            query_boundaries.append([query['area']['min_lon'], query['area']['max_lon']])
-
-    query_boundaries = torch.tensor(query_boundaries, dtype=torch.float32, device=device)
-
-    # 提前停止参数
-    patience = 3
-    patience_counter = 0
-    prev_cost = float('inf')
 
     for epoch in range(epochs):
         optimizer.zero_grad()
-        total_cost = torch.tensor(0.0, dtype=torch.float32, device=device)
+        total_cost = torch.tensor(0.0, dtype=torch.float32)
 
-        # 批量计算所有查询的成本
-        for q_idx, query in enumerate(query_workload):
-            cost = torch.tensor(0.0, dtype=torch.float32, device=device)
-            boundary_low = query_boundaries[q_idx, 0]
-            boundary_high = query_boundaries[q_idx, 1]
+        # 计算总成本：遍历每个查询
+        for query in query_workload:
+            cost = torch.tensor(0.0, dtype=torch.float32)
+            # 根据分割维度获取查询对应的边界
+            if dim == 0:
+                query_boundary_low = query['area']['min_lat']
+                query_boundary_high = query['area']['max_lat']
+            else:
+                query_boundary_low = query['area']['min_lon']
+                query_boundary_high = query['area']['max_lon']
 
-            # 批量处理查询中的所有关键词
+            # 针对查询中的每个关键词计算成本
             for kw in query['keywords']:
                 if kw in cdf_models:
+                    # 根据中频或高频选择不同的 CDF 计算方式
+                    if cdf_models[kw]['gaussian']:
+                        # 中频关键词：使用高斯估计
+                        if dim == 0:
+                            mean = cdf_models[kw]['y_mean']
+                            std = cdf_models[kw]['y_std']
+                        else:
+                            mean = cdf_models[kw]['x_mean']
+                            std = cdf_models[kw]['x_std']
+                        #改成subspace的上下界
+                        F_low = torch.tensor(norm.cdf(subspace_below, loc=mean, scale=std), dtype=torch.float32)
+                        F_split = torch.tensor(norm.cdf(split_value.item(), loc=mean, scale=std), dtype=torch.float32)
+                        F_high = torch.tensor(norm.cdf(subspace_up, loc=mean, scale=std), dtype=torch.float32)
+                    else:
+                        # 高频关键词：使用 NN 模型
+                        model = cdf_models[kw]['y'] if dim == 0 else cdf_models[kw]['x']
+                        # 改成subspace的上下界
+                        F_low = model(torch.tensor([[subspace_below]], dtype=torch.float32))
+                        F_split = model(split_value.view(1, 1))
+                        F_high = model(torch.tensor([[subspace_up]], dtype=torch.float32))
+
+
+                    total_kw = cdf_models[kw]['total_kw']
+                    # 估计子区域内包含该关键词的对象数量(由于split有可能不在low和high区域内，故取非负值)
+                    O1 = torch.clamp((F_split - F_low) * total_kw, min=0.0)
+                    O2 = torch.clamp((F_high - F_split) * total_kw, min=0.0)
+                    # 成本公式：左右两边使用 sigmoid 调整权重
+                    cost_kw = sigmoid(3 * (split_value - torch.tensor([[query_boundary_low]], dtype=torch.float32))) * O1 + \
+                              sigmoid(3 * (torch.tensor([[query_boundary_high]], dtype=torch.float32) - split_value)) * O2
+                    cost += cost_kw.squeeze()
+
+                    # # 输出调试信息
+                    # print(f"Query: {query}")
+                    # print(f"Keyword: {kw}，total_kw:{total_kw}")
+                    # print(f"boundary_low: {boundary_low}, boundary_high: {boundary_high}")
+                    # print(f"F_low: {F_low.item():.4f}, F_split: {F_split.item():.4f}, F_high: {F_high.item():.4f}")
+                    # print(f"O1: {O1.item():.4f}, O2: {O2.item():.4f}, cost_kw: {cost_kw.item():.4f}")
+                    # print("-" * 50)
+            total_cost = total_cost + cost
+
+        # 反向传播前添加约束：限制 split_value 在合理范围内
+        if dim == 0:
+            split_value.data.clamp_(subspace['min_lat'], subspace['max_lat'])
+        else:
+            split_value.data.clamp_(subspace['min_lon'], subspace['max_lon'])
+        # print(f"total cost:{total_cost}")
+
+        total_cost.backward()
+        optimizer.step()
+
+        if total_cost.item() < best_cost:
+            best_cost = total_cost.item()
+            best_split = split_value.item()
+
+    return best_split, best_cost
+
+def find_optimal_partition_sample(subspace, dim, query_workload, cdf_models):
+    min_cost = float('inf')
+    best_split_value = None
+
+    objects = subspace['objects']
+    values = [obj['latitude'] for obj in objects] if dim == 0 else [obj['longitude'] for obj in objects]
+    sorted_values = np.sort(values)
+    sampled_values = sorted_values[::10]
+
+    for value in sampled_values:
+        # 生成子空间并检查有效性
+        left_subspace, right_subspace = generate_subspace(subspace, dim, value)
+
+        # 跳过无效分割
+        if left_subspace is None or right_subspace is None:
+            continue
+
+        # 跳过空子空间
+        if len(left_subspace['objects']) == 0 or len(right_subspace['objects']) == 0:
+            continue
+
+        # 计算总成本：遍历每个查询
+        total_cost = 0
+        for query in query_workload:
+            cost = 0
+            # 根据分割维度获取查询对应的边界
+            if dim == 0:
+                boundary_low = query['area']['min_lat']
+                boundary_high = query['area']['max_lat']
+            else:
+                boundary_low = query['area']['min_lon']
+                boundary_high = query['area']['max_lon']
+
+            # 针对查询中的每个关键词计算成本
+            for kw in query['keywords']:
+                if kw in cdf_models:
+                    # 根据中频或高频选择不同的 CDF 计算方式
                     if cdf_models[kw]['gaussian']:
                         # 中频关键词：使用高斯估计
                         if dim == 0:
@@ -256,99 +328,45 @@ def SGDLearn_optimized(subspace, dim, query_workload, cdf_models, epochs=8, lr=0
                             mean = cdf_models[kw]['x_mean']
                             std = cdf_models[kw]['x_std']
 
-                        # 使用GPU加速CDF计算
-                        F_low = torch.tensor(norm.cdf(subspace_below.cpu().item(), loc=mean, scale=std),
-                                             dtype=torch.float32, device=device)
-                        F_split = torch.tensor(norm.cdf(split_value.detach().cpu().item(), loc=mean, scale=std),
-                                               dtype=torch.float32, device=device)
-                        F_high = torch.tensor(norm.cdf(subspace_up.cpu().item(), loc=mean, scale=std),
-                                              dtype=torch.float32, device=device)
+                        F_low = torch.tensor(norm.cdf(boundary_low, loc=mean, scale=std), dtype=torch.float32)
+                        F_split = torch.tensor(norm.cdf(value.item(), loc=mean, scale=std), dtype=torch.float32)
+                        F_high = torch.tensor(norm.cdf(boundary_high, loc=mean, scale=std), dtype=torch.float32)
                     else:
-                        # 高频关键词：使用NN模型
+                        # 高频关键词：使用 NN 模型
                         model = cdf_models[kw]['y'] if dim == 0 else cdf_models[kw]['x']
-
-                        # 转移到相同设备
-                        if hasattr(model, 'to'):
-                            model = model.to(device)
-
-                        F_low = model(subspace_below.view(1, 1))
-                        F_split = model(split_value.view(1, 1))
-                        F_high = model(subspace_up.view(1, 1))
+                        F_low = model(torch.tensor([[boundary_low]], dtype=torch.float32))
+                        F_split = model(value.view(1, 1))
+                        F_high = model(torch.tensor([[boundary_high]], dtype=torch.float32))
 
                     total_kw = cdf_models[kw]['total_kw']
-                    # 估计子区域内包含该关键词的对象数量
+                    # 估计子区域内包含该关键词的对象数量(由于split有可能不在low和high区域内，故取非负值)
                     O1 = torch.clamp((F_split - F_low) * total_kw, min=0.0)
                     O2 = torch.clamp((F_high - F_split) * total_kw, min=0.0)
-
-                    # 成本公式优化：使用更高效的sigmoid计算
-                    bound_low_tensor = boundary_low.view(1)
-                    bound_high_tensor = boundary_high.view(1)
-
-                    cost_kw = sigmoid(3 * (split_value - bound_low_tensor)) * O1 + \
-                              sigmoid(3 * (bound_high_tensor - split_value)) * O2
+                    # 成本公式：左右两边使用 sigmoid 调整权重
+                    cost_kw = torch.sigmoid(3 * (value - torch.tensor([[boundary_low]], dtype=torch.float32))) * O1 + \
+                                  torch.sigmoid(3 * (torch.tensor([[boundary_high]], dtype=torch.float32) - value)) * O2
                     cost += cost_kw.squeeze()
-
             total_cost = total_cost + cost
 
-        # 优化器步骤之前应用约束
-        if dim == 0:
-            split_value.data.clamp_(subspace['min_lat'], subspace['max_lat'])
-        else:
-            split_value.data.clamp_(subspace['min_lon'], subspace['max_lon'])
-
-        # 反向传播和优化步骤
-        total_cost.backward()
-        optimizer.step()
-
-        # 提前停止检查
-        if abs(total_cost.item() - prev_cost) < 1e-3:
-            patience_counter += 1
-            if patience_counter >= patience:
-                break
-        else:
-            patience_counter = 0
-
-        prev_cost = total_cost.item()
-
-        if total_cost.item() < best_cost:
-            best_cost = total_cost.item()
-            best_split = split_value.item()
-
-    return best_split, best_cost
+        # 更新最优值
+        if total_cost < min_cost:
+            min_cost = total_cost
+            best_split_value = value
+    return {'dim': dim, 'cost': min_cost, 'val': best_split_value}
 
 
-# 优化版本的最优分区查找函数
-def find_optimal_partition(subspace, dim, query_workload, cdf_models, cache={}):
-    # 创建缓存键
-    cache_key = (subspace['min_lat'], subspace['max_lat'],
-                 subspace['min_lon'], subspace['max_lon'], dim)
-
-    # 检查缓存
-    if cache_key in cache:
-        return cache[cache_key]
-
-    # 使用优化的SGD学习
-    optimal_val, predicted_cost = SGDLearn_optimized(subspace, dim, query_workload, cdf_models)
-
-    # 生成子空间
+def find_optimal_partition(subspace, dim, query_workload, cdf_models):
+    optimal_val, predicted_cost = SGDLearn(subspace, dim, query_workload, cdf_models, epochs=15, lr=0.01)
     s1, s2 = generate_subspace(subspace, dim, optimal_val)
-
     if s1 and s2:
-        # 并行计算查询交集
-        num_queries_s1 = calculate_intersecting_queries_gpu(s1, query_workload)
-        num_queries_s2 = calculate_intersecting_queries_gpu(s2, query_workload)
+        num_queries_s1 = calculate_intersecting_queries(s1, query_workload)
+        num_queries_s2 = calculate_intersecting_queries(s2, query_workload)
         C_split = len(s1['objects']) * num_queries_s1 + len(s2['objects']) * num_queries_s2
     else:
         C_split = float('inf')
-
-    result = {'dim': dim, 'cost': C_split, 'val': optimal_val}
-
-    # 存入缓存
-    cache[cache_key] = result
-    return result
+    return {'dim': dim, 'cost': C_split, 'val': optimal_val}
 
 
-# 优化的底部簇生成函数
 def bottom_clusters_generation(query_workload, data_space, cdf_models, w1=0.1, w2=1, MIN_OBJECTS=10):
     # 确保query_workload是字典列表格式
     if isinstance(query_workload, pd.DataFrame):
@@ -359,20 +377,9 @@ def bottom_clusters_generation(query_workload, data_space, cdf_models, w1=0.1, w
     G = []  # 存储最终生成的聚类
     node_id_counter = 0
 
-    # 初始化缓存
-    partition_cache = {}
-
     # 将整个数据空间添加到队列
     for item in data_space:
         Q.enqueue(item)
-
-    # 将PyTorch设置为使用GPU
-    if torch.cuda.is_available():
-        torch.set_default_device('cuda')
-        torch.set_default_dtype(torch.float32)
-        print("使用GPU加速计算")
-    else:
-        print("GPU不可用，使用CPU计算")
 
     while not Q.is_empty():
         s = Q.dequeue()
@@ -391,49 +398,35 @@ def bottom_clusters_generation(query_workload, data_space, cdf_models, w1=0.1, w
                 'min_lon': s['min_lon'],
                 'max_lon': s['max_lon']
             }
-            leaf_node = LeafNode(0, mbr, s['objects'], node_id=node_id_counter)
+            leaf_node = LeafNode(0,mbr, s['objects'], node_id=node_id_counter)
             node_id_counter += 1
             G.append(leaf_node)
             continue
 
-        # 计算查询交集
-        num_queries = calculate_intersecting_queries_gpu(s, query_workload)
-        Cs = num_objects * num_queries
+        num_queries = calculate_intersecting_queries(s, query_workload) #这部分要改：不仅mbr要交，keyword也得匹配
+        Cs = num_objects * num_queries  # 原函数简化为直接计算
 
-        # 并行查找两个维度的最优分割
-        # 使用线程池并行化
-        import concurrent.futures
-
-        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
-            future_x = executor.submit(find_optimal_partition, s, 0, query_workload, cdf_models, partition_cache)
-            future_y = executor.submit(find_optimal_partition, s, 1, query_workload, cdf_models, partition_cache)
-
-            opt_x = future_x.result()
-            opt_y = future_y.result()
+        # 寻找最优分割
+        opt_x = find_optimal_partition(s, dim=0, query_workload=query_workload, cdf_models=cdf_models)
+        opt_y = find_optimal_partition(s, dim=1, query_workload=query_workload, cdf_models=cdf_models)
 
         # 选择成本更低的分割方式
         best = opt_x if opt_x['cost'] <= opt_y['cost'] else opt_y
 
-        # 使用最佳分割生成子空间
         s1, s2 = generate_subspace(s, dim=best['dim'], split_value=best['val'])
-
         if s1 and s2:
-            print(
-                f"分割前对象验证成本: {Cs}, 分割后对象验证成本: {best['cost']}, 增加簇扫描成本: {w1 * len(query_workload)}")
-
-            # 分割条件检查
+            # num_queries_s1 = calculate_intersecting_queries(s1, query_workload)
+            # num_queries_s2 = calculate_intersecting_queries(s2, query_workload)
+            # C_split = (len(s1['objects']) * num_queries_s1 + len(s2['objects']) * num_queries_s2) * w2
+            print(f"分割前对象验证成本: {Cs}, 分割后对象验证成本: {best['cost']}, 增加簇扫描成本: {w1 * len(query_workload)}")
+            # 分割条件：(Cs + w1 * 当前集群数 * | W |) - (C_split + w1 * (当前集群数 + 1) * | W |) > 0
             if (Cs - best['cost']) * w2 > (w1 * len(query_workload)):
                 # 允许分割并加入队列
                 print(f"分割前对象数: {len(s['objects'])}, 查询交集数: {num_queries}, Cs: {Cs}")
                 print(
                     f"分割后对象数: {len(s1['objects'])} + {len(s2['objects'])} = {len(s1['objects']) + len(s2['objects'])}, C_split: {best['cost']}")
-
-                # 预计算新子空间的优先级以减少后续计算
-                priority_s1 = calculate_intersecting_queries_gpu(s1, query_workload)
-                priority_s2 = calculate_intersecting_queries_gpu(s2, query_workload)
-
-                Q.enqueue(s1, priority_s1)
-                Q.enqueue(s2, priority_s2)
+                Q.enqueue(s1)
+                Q.enqueue(s2)
                 print(f"成本缩小，可以分割")
             else:
                 # 创建叶子节点并添加到结果
@@ -443,7 +436,7 @@ def bottom_clusters_generation(query_workload, data_space, cdf_models, w1=0.1, w
                     'min_lon': s['min_lon'],
                     'max_lon': s['max_lon']
                 }
-                leaf_node = LeafNode(0, mbr, s['objects'], node_id=node_id_counter)
+                leaf_node = LeafNode(0,mbr, s['objects'], node_id=node_id_counter)
                 node_id_counter += 1
                 G.append(leaf_node)
         else:
@@ -454,16 +447,13 @@ def bottom_clusters_generation(query_workload, data_space, cdf_models, w1=0.1, w
                 'min_lon': s['min_lon'],
                 'max_lon': s['max_lon']
             }
-            leaf_node = LeafNode(0, mbr, s['objects'], node_id=node_id_counter)
+            leaf_node = LeafNode(0,mbr, s['objects'], node_id=node_id_counter)
             node_id_counter += 1
             G.append(leaf_node)
 
+
+
     print(f"已生成聚类数: {len(G)}")
-
-    # 清理GPU缓存
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
-
     # 转换为字典格式以兼容当前代码
     bottom_nodes = [leaf_node.to_dict() for leaf_node in G]
     return bottom_nodes

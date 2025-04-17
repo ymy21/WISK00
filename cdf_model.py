@@ -170,20 +170,20 @@ def train_cdf_models(data, query_workload, epochs=100, lr=0.06):
     for keyword in keywords:
         freq = keyword_freq.get(keyword, 0)
         total_kw = keyword_counts.get(keyword, 0)  # 记录每个关键词的总频次
-        print(f"处理关键词 {keyword}, 频率: {freq:.6f}")
+        # print(f"处理关键词 {keyword}, 频率: {freq:.6f}")
 
         # 低频关键词直接忽略
         if freq <= low_threshold:
-            print(f"关键词 {keyword} 是低频关键词 (freq={freq:.6f})，忽略。")
+            # print(f"关键词 {keyword} 是低频关键词 (freq={freq:.6f})，忽略。")
             continue
 
         # 获取包含该关键词的数据
         keyword_data = data[data['keywords'].apply(lambda x: keyword in x)]
         if len(keyword_data) < 10:
-            print(f"警告: 关键词 {keyword} 的数据量不足 ({len(keyword_data)} 条)，跳过训练。")
+            # print(f"警告: 关键词 {keyword} 的数据量不足 ({len(keyword_data)} 条)，跳过训练。")
             continue
 
-        print(f"使用 {len(keyword_data)} 条数据训练关键词 {keyword} 的模型")
+        # print(f"使用 {len(keyword_data)} 条数据训练关键词 {keyword} 的模型")
 
         # 使用原始经纬度数据
         x_vals_orig = keyword_data['longitude'].values.reshape(-1, 1)
@@ -195,7 +195,7 @@ def train_cdf_models(data, query_workload, epochs=100, lr=0.06):
 
         if freq < medium_threshold:
             # 中频关键词：使用高斯近似
-            print(f"关键词 {keyword} 为中频关键词，采用高斯近似")
+            # print(f"关键词 {keyword} 为中频关键词，采用高斯近似")
             # 直接使用原始数据计算均值和标准差
             x_mean = x_vals_orig.mean().item()
             x_std = max(x_vals_orig.std().item(), 1e-6)
@@ -236,7 +236,7 @@ def train_cdf_models(data, query_workload, epochs=100, lr=0.06):
 
         else:
             # 高频关键词：采用NN预测CDF
-            print(f"关键词 {keyword} 为高频关键词，采用 NN 拟合排序的 CDF")
+            # print(f"关键词 {keyword} 为高频关键词，采用 NN 拟合排序的 CDF")
             # # 使用 QuantileTransformer 计算目标 CDF（基于排序）
             # qt_x = QuantileTransformer(output_distribution='uniform', random_state=0)
             # qt_y = QuantileTransformer(output_distribution='uniform', random_state=0)
@@ -282,7 +282,7 @@ def train_cdf_models(data, query_workload, epochs=100, lr=0.06):
                 loss = criterion(outputs, target_x)
                 loss.backward()
                 optimizer_x.step()
-                print(f"关键词: {keyword}, X方向, Epoch {epoch}, Loss: {loss.item():.6f}")
+                # print(f"关键词: {keyword}, X方向, Epoch {epoch}, Loss: {loss.item():.6f}")
 
             # 训练Y方向
             model_y.train()
@@ -292,7 +292,7 @@ def train_cdf_models(data, query_workload, epochs=100, lr=0.06):
                 loss = criterion(outputs, target_y)
                 loss.backward()
                 optimizer_y.step()
-                print(f"关键词: {keyword}, Y方向, Epoch {epoch}, Loss: {loss.item():.6f}")
+                # print(f"关键词: {keyword}, Y方向, Epoch {epoch}, Loss: {loss.item():.6f}")
 
             cdf_models[keyword] = {
                 'gaussian': False,
