@@ -149,21 +149,21 @@ class PackingEnv:
         # 采用平均每个查询节点访问数减少作为 reward
         # 计算并应用奖励缩放，提高训练稳定性
         reward = prev_access - new_access
-
-
-        # 归一化相对改进
-        if prev_access > 0:
-            relative_improvement = (prev_access - new_access) / prev_access
-            base_reward = relative_improvement * 10.0  # 缩放因子
-        else:
-            base_reward = prev_access - new_access
-
-        # 正则化以防止过度打包
-        children_count = len(target['children'])
-        optimal_children = max(2, self.N // 5)  # 每个节点的目标子节点
-        regularization = -0.2 * ((children_count - optimal_children) / optimal_children) ** 2
-
-        reward = base_reward + regularization
+        #
+        #
+        # # 归一化相对改进
+        # if prev_access > 0:
+        #     relative_improvement = (prev_access - new_access) / prev_access
+        #     base_reward = relative_improvement * 10.0  # 缩放因子
+        # else:
+        #     base_reward = prev_access - new_access
+        #
+        # # 正则化以防止过度打包
+        # children_count = len(target['children'])
+        # optimal_children = max(2, self.N // 5)  # 每个节点的目标子节点
+        # regularization = -0.2 * ((children_count - optimal_children) / optimal_children) ** 2
+        #
+        # reward = base_reward + regularization
         # reward = base_reward
         # 更新累积奖励，用于终止条件判断
         self.total_reward += reward
@@ -206,11 +206,7 @@ class PackingEnv:
             for i in range(self.current_step, len(self.current_layer)):
                 if self.current_layer[i]['MBR'] is not None:
                     query_access += 1  # 未打包节点的访问成本
-                    #
-                    # # 如果节点与查询匹配，计算验证成本
-                    # if self._mbr_intersect(self.current_layer[i]['MBR'], query) and any(
-                    #         kw in self.current_layer[i]['labels'] for kw in query['keywords']):
-                    #     query_access += self.w2  # 验证成本
+
 
             total_access += query_access
 
@@ -261,7 +257,7 @@ class DQN(nn.Module):
 # DQNAgent
 ##########################################
 class DQNAgent:
-    def __init__(self, state_dim, action_dim, gamma=0.99, lr=5e-3):
+    def __init__(self, state_dim, action_dim, gamma=0.99, lr=1e-4):
         self.state_dim = state_dim
         self.action_dim = action_dim
 
@@ -271,7 +267,7 @@ class DQNAgent:
 
         self.optimizer = torch.optim.Adam(self.policy_net.parameters(), lr=lr)
 
-        self.memory = deque(maxlen=1000) #与论文设定不同256
+        self.memory = deque(maxlen=10000) #与论文设定不同256
         self.batch_size = 64
         self.gamma = gamma
 
@@ -285,7 +281,7 @@ class DQNAgent:
 
         # 添加步数计数和目标网络更新频率
         self.steps_done = 0
-        self.target_update_freq = 10  # 每10步更新一次
+        self.target_update_freq = 100  # 每100步更新一次
 
     def select_action(self, state, valid_actions):
         state_tensor = torch.FloatTensor(state).unsqueeze(0).to(device)
@@ -311,13 +307,15 @@ class DQNAgent:
         # 计数更新步数
         self.steps_done += 1
 #for
-        # 增加多次训练循环，每次打包一个节点可以训练多次
+        # 每次状态转换后进行多次学习，而不是固定10次
+        training_iterations = min(10, len(self.memory) // self.batch_size)
+
         avg_loss = 0.0
         avg_max_q = 0.0
         avg_min_q = 0.0
-        training_iterations = 10  # 每次打包后训练多次网络
 
         for _ in range(training_iterations):
+            # 从经验回放缓冲区中随机采样
             batch = random.sample(self.memory, self.batch_size)
             states, actions, rewards, next_states = zip(*batch)
 
@@ -358,7 +356,7 @@ class DQNAgent:
         # 返回平均统计量
         return avg_loss / training_iterations, avg_max_q / training_iterations, avg_min_q / training_iterations
 
-    def soft_update_target(self, tau=0.01): #增加软更新速率
+    def soft_update_target(self, tau=0.001):
         for target_param, policy_param in zip(self.target_net.parameters(), self.policy_net.parameters()):
             target_param.data.copy_(tau * policy_param.data + (1 - tau) * target_param.data)
 
@@ -397,7 +395,7 @@ def hierarchical_packing_training(bottom_nodes, query_workload, max_level=20):
 
     for level in range(max_level):
         # 避免多层经验混淆
-        global_agent.memory.clear()
+        # global_agent.memory.clear()
          # 初始化前一层的非空节点数
         prev_non_empty = sum(1 for node in current_layer if  node['MBR'] is not None)
         print(f"Level {level + 1}: Non-empty nodes = {prev_non_empty}")
@@ -497,6 +495,7 @@ def train_single_level(current_layer, query_workload, current_layer_level, agent
         epoch_loss = []
         epoch_max_q = []
         epoch_min_q = []
+        updates = 0  # 跟踪当前epoch的网络更新次数
 
         while not done:
             valid_actions = env.get_valid_actions() # 获取布尔掩码
@@ -504,21 +503,32 @@ def train_single_level(current_layer, query_workload, current_layer_level, agent
             next_state, reward, done = env.step(action)
 
             total_reward += reward
-            # if total_reward <= -env.N:  # 论文条件
-            #     done = True
 
             # 存储经验
             if next_state is not None:
                 agent.store_transition(state, action, reward, next_state)
-                loss, max_q, min_q = agent.update_model()
-                if loss != 0.0:
-                    epoch_loss.append(loss)
-                    epoch_max_q.append(max_q)
-                    epoch_min_q.append(min_q)
+                # 每个状态转换后进行网络更新
+                if len(agent.memory) >= agent.batch_size:
+                    loss, max_q, min_q = agent.update_model()
+                    if loss != 0.0:
+                        epoch_loss.append(loss)
+                        epoch_max_q.append(max_q)
+                        epoch_min_q.append(min_q)
+                    updates += 1
                 state = next_state
             else:
+                agent.store_transition(state, action, reward, next_state)
                 break
-        # 在每个epoch结束后更新epsilon
+        # 确保每个epoch至少有足够次数的网络更新
+        #
+        while updates < 300 and len(agent.memory) >= agent.batch_size:
+            loss, max_q, min_q = agent.update_model()
+            if loss != 0.0:
+                epoch_loss.append(loss)
+                epoch_max_q.append(max_q)
+                epoch_min_q.append(min_q)
+            updates += 1
+
         agent.update_epsilon()
 
         # 记录统计量
