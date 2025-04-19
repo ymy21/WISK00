@@ -193,14 +193,16 @@ def search_rtree(query_rect, query_keywords, node, node_counter, obj_counter=Non
 
     if node.is_leaf:
         for objects_list, obj_mbr in node.entries:
-            # 已经在上面检查过MBR和关键词，这里直接处理对象
             for obj in objects_list:
                 # 计数已扫描对象
                 if obj_counter is not None:
                     obj_counter[0] += 1
 
                 # 检查单个对象是否符合条件
-                if keyword_intersect(obj.get('keywords', []), query_keywords):
+                if (keyword_intersect(obj.get('keywords', []), query_keywords) and
+                        'latitude' in obj and 'longitude' in obj and
+                        query_rect['min_lat'] <= obj['latitude'] <= query_rect['max_lat'] and
+                        query_rect['min_lon'] <= obj['longitude'] <= query_rect['max_lon']):
                     results.append(obj)
     else:
         # 非叶子节点，递归搜索子节点

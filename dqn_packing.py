@@ -85,7 +85,8 @@ class PackingEnv:
             # 如果没有下一底层节点，则后面的 m 维置为0
             for j in range(self.m):
                 state[self.N * (self.m + 1) + j] = 0
-
+        # 添加当前层级作为一个整数特征
+        state = np.append(state, self.current_layer_level)
         return state
 
     def get_action_mask(self):
@@ -149,9 +150,23 @@ class PackingEnv:
         # 计算并应用奖励缩放，提高训练稳定性
         reward = prev_access - new_access
 
+
+        # 归一化相对改进
+        if prev_access > 0:
+            relative_improvement = (prev_access - new_access) / prev_access
+            base_reward = relative_improvement * 10.0  # 缩放因子
+        else:
+            base_reward = prev_access - new_access
+
+        # 正则化以防止过度打包
+        children_count = len(target['children'])
+        optimal_children = max(2, self.N // 5)  # 每个节点的目标子节点
+        regularization = -0.2 * ((children_count - optimal_children) / optimal_children) ** 2
+
+        reward = base_reward + regularization
+        # reward = base_reward
         # 更新累积奖励，用于终止条件判断
         self.total_reward += reward
-
         # # 应用论文终止条件：如果累积奖励不大于-N，提前终止
         # if self.total_reward <= -self.N:
         #     done = True
@@ -246,7 +261,7 @@ class DQN(nn.Module):
 # DQNAgent
 ##########################################
 class DQNAgent:
-    def __init__(self, state_dim, action_dim, gamma=0.99, lr=1e-2):
+    def __init__(self, state_dim, action_dim, gamma=0.99, lr=5e-3):
         self.state_dim = state_dim
         self.action_dim = action_dim
 
@@ -256,7 +271,7 @@ class DQNAgent:
 
         self.optimizer = torch.optim.Adam(self.policy_net.parameters(), lr=lr)
 
-        self.memory = deque(maxlen=10000) #与论文设定不同256
+        self.memory = deque(maxlen=1000) #与论文设定不同256
         self.batch_size = 64
         self.gamma = gamma
 
@@ -300,7 +315,7 @@ class DQNAgent:
         avg_loss = 0.0
         avg_max_q = 0.0
         avg_min_q = 0.0
-        training_iterations = 50  # 每次打包后训练多次网络
+        training_iterations = 10  # 每次打包后训练多次网络
 
         for _ in range(training_iterations):
             batch = random.sample(self.memory, self.batch_size)
@@ -327,7 +342,7 @@ class DQNAgent:
             self.optimizer.zero_grad()
             loss.backward()
             # 梯度裁剪，防止梯度爆炸
-            torch.nn.utils.clip_grad_norm_(self.policy_net.parameters(), max_norm=1.0)
+            torch.nn.utils.clip_grad_norm_(self.policy_net.parameters(), max_norm=5.0) #增大梯度裁剪范数
             self.optimizer.step()
 
             # 更新统计量
@@ -343,7 +358,7 @@ class DQNAgent:
         # 返回平均统计量
         return avg_loss / training_iterations, avg_max_q / training_iterations, avg_min_q / training_iterations
 
-    def soft_update_target(self, tau=0.001):
+    def soft_update_target(self, tau=0.01): #增加软更新速率
         for target_param, policy_param in zip(self.target_net.parameters(), self.policy_net.parameters()):
             target_param.data.copy_(tau * policy_param.data + (1 - tau) * target_param.data)
 
@@ -376,11 +391,13 @@ def hierarchical_packing_training(bottom_nodes, query_workload, max_level=20):
     # 计算状态空间和动作空间维度
     m = len(query_workload)
     N = len(bottom_nodes)
-    state_dim = (m + 1) * N + m
+    state_dim = (m + 1) * N + m + 1
     action_dim = N
     global_agent = DQNAgent(state_dim, action_dim)
 
     for level in range(max_level):
+        # 避免多层经验混淆
+        global_agent.memory.clear()
          # 初始化前一层的非空节点数
         prev_non_empty = sum(1 for node in current_layer if  node['MBR'] is not None)
         print(f"Level {level + 1}: Non-empty nodes = {prev_non_empty}")
@@ -461,7 +478,7 @@ def hierarchical_packing_training(bottom_nodes, query_workload, max_level=20):
 ##########################################
 # 单层训练函数：训练 RL 代理以优化当前层的 packing 策略
 ##########################################
-def train_single_level(current_layer, query_workload, current_layer_level, agent, epochs=500):
+def train_single_level(current_layer, query_workload, current_layer_level, agent, epochs=1000):
     # 添加数据验证
     if len(query_workload) == 0:
         raise ValueError("Query workload is empty")
