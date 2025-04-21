@@ -1,12 +1,13 @@
 from data_preparation import load_real_dataset, generate_query_workload
 from cdf_model import train_cdf_models
-from bottom_clusters import bottom_clusters_generation
+from bottom_clusters import bottom_clusters_generation,visualize_clusters,visualize_clusters_advanced
 from dqn_packing import (
     hierarchical_packing_training,
     final_tree_construction,
     build_nested_tree
 )
 from query_processing import process_query
+from tree_visualization import visualize_tree_layers, visualize_final_tree
 import pandas as pd
 import torch
 # 导入修改后的R-tree比较函数
@@ -22,9 +23,9 @@ def main():
     # 1. 准备数据
     print("Loading real dataset and generating query workload...")
     file_path = "dataset/dataset_TSMC2014_NYC.txt"  # 更新为真实数据集的路径
-    num_object = 20000
+    num_object = 200
     data = load_real_dataset(file_path, num_objects=num_object)
-    num_query = 10000
+    num_query = 100
     query_workload = generate_query_workload(data, num_queries=num_query, num_keywords=5, buffer=0.01)
     print("Dataset and query workload generated.")
 
@@ -106,6 +107,13 @@ def main():
     #     }
     #     bottom_nodes.append(bottom_node)
     print(f"Bottom nodes built: {len(clusters)} nodes.")
+
+    # 基础可视化
+    visualize_clusters(clusters, objects)
+
+    # 高级可视化，包含更多细节
+    # visualize_clusters_advanced(clusters, objects, train_queries)
+
     avg_objects_per_leaf = num_object // len(clusters)
     # 6. 强化学习训练阶段
     print("Starting reinforcement learning training phase...")
@@ -117,10 +125,22 @@ def main():
     print("Starting final tree construction phase...")
     final_tree = final_tree_construction(clusters, train_queries, agent)
     print("Final tree structure constructed.")
+    # 新增：可视化最终构建的树结构（包含查询和原始数据点）
+    print("Visualizing final tree structure...")
+    visualize_tree_layers(final_tree, train_queries, objects)
 
     # 8. 转换成树结构
     root_node = build_nested_tree(final_tree)
     print("Tree index structure built.")
+    # 新增：可视化最终的嵌套树结构（包含查询和原始数据点）
+    print("Visualizing final nested tree structure...")
+    if root_node is not None:
+        if isinstance(root_node, list):
+            for i, root in enumerate(root_node):
+                print(f"Visualizing root node {i + 1}/{len(root_node)}")
+                visualize_final_tree(root, train_queries, objects)
+        else:
+            visualize_final_tree(root_node, train_queries, objects)
 
     # 9. 处理查询
     print("Processing queries...")

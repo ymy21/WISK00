@@ -85,7 +85,7 @@ def load_real_dataset(file_path, num_objects=None):
     GLOBAL_GEO_BOUNDS['max_lon'] = 1.0
 
 
-
+#
 # #观察原始数据分布
 #     plt.figure(figsize=(12, 6))
 #
@@ -201,28 +201,28 @@ def generate_query_workload(df, num_queries=500, num_keywords=5, buffer=0.01):
         'eval': pd.DataFrame(queries[num_train + num_build:])
     }
 
-    # # 假设 df 是你加载的原始数据，workload 是通过 generate_query_workload 得到的查询集合（例如取 train 部分）
-    # # 如果 workload 是一个字典，这里我们取 'train' 部分
-    # queries = workload['train'].to_dict('records')
-    #
-    # plt.figure(figsize=(10, 10))
-    # # 绘制所有原始数据点，蓝色散点图
-    # plt.scatter(df['longitude'], df['latitude'], s=10, c='blue', alpha=0.5, label='Data points')
-    #
-    # # 对于每个 query，绘制其矩形区域（红色边框）
-    # for query in queries:
-    #     area = query['area']
-    #     width = area['max_lon'] - area['min_lon']
-    #     height = area['max_lat'] - area['min_lat']
-    #     rect = patches.Rectangle((area['min_lon'], area['min_lat']), width, height, edgecolor='red', facecolor='none',
-    #                              lw=2)
-    #     plt.gca().add_patch(rect)
-    #
-    # plt.xlabel('Longitude')
-    # plt.ylabel('Latitude')
-    # plt.title('Query Regions Overlay on Data Points')
-    # plt.legend()
-    # plt.show()
+    # 假设 df 是你加载的原始数据，workload 是通过 generate_query_workload 得到的查询集合（例如取 train 部分）
+    # 如果 workload 是一个字典，这里我们取 'train' 部分
+    queries = workload['train'].to_dict('records')
+
+    plt.figure(figsize=(10, 10))
+    # 绘制所有原始数据点，蓝色散点图
+    plt.scatter(df['longitude'], df['latitude'], s=10, c='blue', alpha=0.5, label='Data points')
+
+    # 对于每个 query，绘制其矩形区域（红色边框）
+    for query in queries:
+        area = query['area']
+        width = area['max_lon'] - area['min_lon']
+        height = area['max_lat'] - area['min_lat']
+        rect = patches.Rectangle((area['min_lon'], area['min_lat']), width, height, edgecolor='red', facecolor='none',
+                                 lw=2)
+        plt.gca().add_patch(rect)
+
+    plt.xlabel('Longitude')
+    plt.ylabel('Latitude')
+    plt.title('Query Regions Overlay on Data Points')
+    plt.legend()
+    plt.show()
     return workload
 
 # data 是一个 DataFrame，包含 latitude、longitude 和 keywords 列。keywords 列是一个列表，包含每个对象的关键词。

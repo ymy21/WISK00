@@ -254,7 +254,7 @@ def search_wisk(query_rect, query_keywords, node, node_counter, obj_counter=None
 
         # 检查子节点类型，如果children是空列表或者不存在，可能是叶子节点
         if not children:
-            # 检查是否有leaf_objects字段（根据代码，这可能存储了叶子节点的对象）
+            # 检查是否有leaf_objects字段
             leaf_objects = current_node.get('leaf_objects', [])
             if leaf_objects:
                 for obj in leaf_objects:
@@ -338,9 +338,7 @@ def compare_rtree_wisk(raw_objects, wisk_index, eval_queries, avg_object):
     # 计算性能比值
     node_ratio = avg_wisk_nodes / avg_rtree_nodes if avg_rtree_nodes > 0 else float('inf')
     object_ratio = avg_wisk_objects / avg_rtree_objects if avg_rtree_objects > 0 else float('inf')
-    total_cost_ratio = (avg_wisk_nodes + avg_wisk_objects) / (avg_rtree_nodes + avg_rtree_objects) if (
-                                                                                                                  avg_rtree_nodes + avg_rtree_objects) > 0 else float(
-        'inf')
+    total_cost_ratio = (avg_wisk_nodes + avg_wisk_objects) / (avg_rtree_nodes + avg_rtree_objects) if ( avg_rtree_nodes + avg_rtree_objects) > 0 else float( 'inf')
 
     print("\n性能比较（WISK / R-tree）:")
     print(f"节点访问比值: {node_ratio:.4f} {'(WISK更好)' if node_ratio < 1 else '(R-tree更好)'}")

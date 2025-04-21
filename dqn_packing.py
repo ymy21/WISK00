@@ -268,7 +268,7 @@ class DQNAgent:
         self.optimizer = torch.optim.Adam(self.policy_net.parameters(), lr=lr)
 
         self.memory = deque(maxlen=10000) #与论文设定不同256
-        self.batch_size = 64
+        self.batch_size = 256
         self.gamma = gamma
 
         self.epsilon = 1.0
@@ -307,8 +307,8 @@ class DQNAgent:
         # 计数更新步数
         self.steps_done += 1
 #for
-        # 每次状态转换后进行多次学习，而不是固定10次
-        training_iterations = min(10, len(self.memory) // self.batch_size)
+
+        training_iterations = 20
 
         avg_loss = 0.0
         avg_max_q = 0.0
@@ -476,7 +476,7 @@ def hierarchical_packing_training(bottom_nodes, query_workload, max_level=20):
 ##########################################
 # 单层训练函数：训练 RL 代理以优化当前层的 packing 策略
 ##########################################
-def train_single_level(current_layer, query_workload, current_layer_level, agent, epochs=1000):
+def train_single_level(current_layer, query_workload, current_layer_level, agent, epochs=500):
     # 添加数据验证
     if len(query_workload) == 0:
         raise ValueError("Query workload is empty")
@@ -519,15 +519,15 @@ def train_single_level(current_layer, query_workload, current_layer_level, agent
             else:
                 agent.store_transition(state, action, reward, next_state)
                 break
-        # 确保每个epoch至少有足够次数的网络更新
-        #
-        while updates < 300 and len(agent.memory) >= agent.batch_size:
-            loss, max_q, min_q = agent.update_model()
-            if loss != 0.0:
-                epoch_loss.append(loss)
-                epoch_max_q.append(max_q)
-                epoch_min_q.append(min_q)
-            updates += 1
+        # # 确保每个epoch至少有足够次数的网络更新
+        # #
+        # while updates < 300 and len(agent.memory) >= agent.batch_size:
+        #     loss, max_q, min_q = agent.update_model()
+        #     if loss != 0.0:
+        #         epoch_loss.append(loss)
+        #         epoch_max_q.append(max_q)
+        #         epoch_min_q.append(min_q)
+        #     updates += 1
 
         agent.update_epsilon()
 
