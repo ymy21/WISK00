@@ -170,6 +170,103 @@ def generate_subspace(subspace, dim, split_value):
 
 
 
+# def SGDLearn(subspace, dim, query_workload, cdf_models, epochs=15, lr=0.01):
+#     # 初始分割点
+#     initial_value = subspace['min_lat'] + (subspace['max_lat'] - subspace['min_lat']) / 2 if dim == 0 \
+#         else subspace['min_lon'] + (subspace['max_lon'] - subspace['min_lon']) / 2
+#     split_value = torch.tensor([initial_value], dtype=torch.float32, requires_grad=True)
+#     optimizer = torch.optim.Adam([split_value], lr=lr)
+#
+#     best_cost = float('inf')
+#     best_split = initial_value
+#     sigmoid = torch.sigmoid
+#
+#     if dim == 0:
+#         subspace_below = subspace['min_lat']
+#         subspace_up = subspace['max_lat']
+#     else:
+#         subspace_below = subspace['min_lon']
+#         subspace_up = subspace['max_lon']
+#
+#
+#     for epoch in range(epochs):
+#         optimizer.zero_grad()
+#         total_cost = torch.tensor(0.0, dtype=torch.float32)
+#
+#         # 计算总成本：遍历每个查询
+#         for query in query_workload:
+#             cost = torch.tensor(0.0, dtype=torch.float32)
+#             # 根据分割维度获取查询对应的边界
+#             if dim == 0:
+#                 query_boundary_low = query['area']['min_lat']
+#                 query_boundary_high = query['area']['max_lat']
+#             else:
+#                 query_boundary_low = query['area']['min_lon']
+#                 query_boundary_high = query['area']['max_lon']
+#
+#             # 针对查询中的每个关键词计算成本
+#             for kw in query['keywords']:
+#                 if kw in cdf_models:
+#                     # 根据中频或高频选择不同的 CDF 计算方式
+#                     if cdf_models[kw]['gaussian']:
+#                         # 中频关键词：使用高斯估计
+#                         if dim == 0:
+#                             mean = cdf_models[kw]['y']['y_mean']
+#                             std = cdf_models[kw]['y']['y_std']
+#                         else:
+#                             mean = cdf_models[kw]['x']['x_mean']
+#                             std = cdf_models[kw]['x']['x_std']
+#                         #改成数据subspace的上下界(而非query的上下界)
+#                         F_low = torch.tensor(norm.cdf(subspace_below, loc=mean, scale=std), dtype=torch.float32)
+#                         F_split = torch.tensor(norm.cdf(split_value.item(), loc=mean, scale=std), dtype=torch.float32)
+#                         F_high = torch.tensor(norm.cdf(subspace_up, loc=mean, scale=std), dtype=torch.float32)
+#                     else:
+#                         # 高频关键词：使用 NN 模型
+#                         model = cdf_models[kw]['y'] if dim == 0 else cdf_models[kw]['x']
+#                         # 改成subspace的上下界
+#                         F_low = model(torch.tensor([[subspace_below]], dtype=torch.float32))
+#                         F_split = model(split_value.view(1, 1))
+#                         F_high = model(torch.tensor([[subspace_up]], dtype=torch.float32))
+#
+#
+#                     total_kw = cdf_models[kw]['total_kw']
+#                     # 估计子区域内包含该关键词的对象数量（根据cdf的单调递增性质，计算的一定是非负的）
+#                     O1 = torch.clamp((F_split - F_low) * total_kw, min=0.0)
+#                     O2 = torch.clamp((F_high - F_split) * total_kw, min=0.0)
+#                     # 成本公式：左右两边使用 sigmoid 调整权重
+#                     cost_kw = sigmoid(3 * (split_value - torch.tensor([[query_boundary_low]], dtype=torch.float32))) * O1 + \
+#                               sigmoid(3 * (torch.tensor([[query_boundary_high]], dtype=torch.float32) - split_value)) * O2
+#                     cost += cost_kw.squeeze()
+#
+#                     # # 输出调试信息
+#                     # print(f"Query: {query}")
+#                     # print(f"Keyword: {kw}，total_kw:{total_kw}")
+#                     # print(f"boundary_low: {boundary_low}, boundary_high: {boundary_high}")
+#                     # print(f"F_low: {F_low.item():.4f}, F_split: {F_split.item():.4f}, F_high: {F_high.item():.4f}")
+#                     # print(f"O1: {O1.item():.4f}, O2: {O2.item():.4f}, cost_kw: {cost_kw.item():.4f}")
+#                     # print("-" * 50)
+#
+#                 # else: # 低频关键词直接被忽略了
+#
+#
+#             total_cost = total_cost + cost
+#
+#         # 反向传播前添加约束：限制 split_value 在合理范围内
+#         if dim == 0:
+#             split_value.data.clamp_(subspace['min_lat'], subspace['max_lat'])
+#         else:
+#             split_value.data.clamp_(subspace['min_lon'], subspace['max_lon'])
+#         # print(f"total cost:{total_cost}")
+#
+#         total_cost.backward()
+#         optimizer.step()
+#
+#         if total_cost.item() < best_cost:
+#             best_cost = total_cost.item()
+#             best_split = split_value.item()
+#
+#     return best_split, best_cost
+
 def SGDLearn(subspace, dim, query_workload, cdf_models, epochs=15, lr=0.01):
     # 初始分割点
     initial_value = subspace['min_lat'] + (subspace['max_lat'] - subspace['min_lat']) / 2 if dim == 0 \
@@ -180,13 +277,10 @@ def SGDLearn(subspace, dim, query_workload, cdf_models, epochs=15, lr=0.01):
     best_cost = float('inf')
     best_split = initial_value
     sigmoid = torch.sigmoid
-    if dim == 0:
-        subspace_below = subspace['min_lat']
-        subspace_up = subspace['max_lat']
-    else:
-        subspace_below = subspace['min_lon']
-        subspace_up = subspace['max_lon']
 
+    # 获取子空间的边界
+    lat_min, lat_max = subspace['min_lat'], subspace['max_lat']
+    lon_min, lon_max = subspace['min_lon'], subspace['max_lon']
 
     for epoch in range(epochs):
         optimizer.zero_grad()
@@ -195,58 +289,78 @@ def SGDLearn(subspace, dim, query_workload, cdf_models, epochs=15, lr=0.01):
         # 计算总成本：遍历每个查询
         for query in query_workload:
             cost = torch.tensor(0.0, dtype=torch.float32)
-            # 根据分割维度获取查询对应的边界
-            if dim == 0:
-                query_boundary_low = query['area']['min_lat']
-                query_boundary_high = query['area']['max_lat']
-            else:
-                query_boundary_low = query['area']['min_lon']
-                query_boundary_high = query['area']['max_lon']
+
+            # 查询边界
+            query_lat_low = query['area']['min_lat']
+            query_lat_high = query['area']['max_lat']
+            query_lon_low = query['area']['min_lon']
+            query_lon_high = query['area']['max_lon']
 
             # 针对查询中的每个关键词计算成本
             for kw in query['keywords']:
                 if kw in cdf_models:
-                    # 根据中频或高频选择不同的 CDF 计算方式
+                    # 获取两个维度的CDF值
                     if cdf_models[kw]['gaussian']:
                         # 中频关键词：使用高斯估计
-                        if dim == 0:
-                            mean = cdf_models[kw]['y']['y_mean']
-                            std = cdf_models[kw]['y']['y_std']
-                        else:
-                            mean = cdf_models[kw]['x']['x_mean']
-                            std = cdf_models[kw]['x']['x_std']
-                        #改成数据subspace的上下界(而非query的上下界)
-                        F_low = torch.tensor(norm.cdf(subspace_below, loc=mean, scale=std), dtype=torch.float32)
-                        F_split = torch.tensor(norm.cdf(split_value.item(), loc=mean, scale=std), dtype=torch.float32)
-                        F_high = torch.tensor(norm.cdf(subspace_up, loc=mean, scale=std), dtype=torch.float32)
-                    else:
-                        # 高频关键词：使用 NN 模型
-                        model = cdf_models[kw]['y'] if dim == 0 else cdf_models[kw]['x']
-                        # 改成subspace的上下界
-                        F_low = model(torch.tensor([[subspace_below]], dtype=torch.float32))
-                        F_split = model(split_value.view(1, 1))
-                        F_high = model(torch.tensor([[subspace_up]], dtype=torch.float32))
+                        # 纬度（y）的CDF值
+                        lat_mean = cdf_models[kw]['y']['y_mean']
+                        lat_std = cdf_models[kw]['y']['y_std']
+                        F_lat_min = torch.tensor(norm.cdf(lat_min, loc=lat_mean, scale=lat_std), dtype=torch.float32)
+                        F_lat_max = torch.tensor(norm.cdf(lat_max, loc=lat_mean, scale=lat_std), dtype=torch.float32)
 
+                        # 经度（x）的CDF值
+                        lon_mean = cdf_models[kw]['x']['x_mean']
+                        lon_std = cdf_models[kw]['x']['x_std']
+                        F_lon_min = torch.tensor(norm.cdf(lon_min, loc=lon_mean, scale=lon_std), dtype=torch.float32)
+                        F_lon_max = torch.tensor(norm.cdf(lon_max, loc=lon_mean, scale=lon_std), dtype=torch.float32)
+
+                        # 分割点的CDF值
+                        if dim == 0:  # 分割纬度
+                            F_split = torch.tensor(norm.cdf(split_value.item(), loc=lat_mean, scale=lat_std),dtype=torch.float32)
+                        else:  # 分割经度
+                            F_split = torch.tensor(norm.cdf(split_value.item(), loc=lon_mean, scale=lon_std),dtype=torch.float32)
+                    else:
+                        # 高频关键词：使用NN模型
+                        lat_model = cdf_models[kw]['y']
+                        lon_model = cdf_models[kw]['x']
+
+                        # 纬度的CDF值
+                        F_lat_min = lat_model(torch.tensor([[lat_min]], dtype=torch.float32))
+                        F_lat_max = lat_model(torch.tensor([[lat_max]], dtype=torch.float32))
+
+                        # 经度的CDF值
+                        F_lon_min = lon_model(torch.tensor([[lon_min]], dtype=torch.float32))
+                        F_lon_max = lon_model(torch.tensor([[lon_max]], dtype=torch.float32))
+
+                        # 分割点的CDF值
+                        if dim == 0:  # 分割纬度
+                            F_split = lat_model(split_value.view(1, 1))
+                        else:  # 分割经度
+                            F_split = lon_model(split_value.view(1, 1))
 
                     total_kw = cdf_models[kw]['total_kw']
-                    # 估计子区域内包含该关键词的对象数量（根据cdf的单调递增性质，计算的一定是非负的）
-                    O1 = torch.clamp((F_split - F_low) * total_kw, min=0.0)
-                    O2 = torch.clamp((F_high - F_split) * total_kw, min=0.0)
-                    # 成本公式：左右两边使用 sigmoid 调整权重
-                    cost_kw = sigmoid(3 * (split_value - torch.tensor([[query_boundary_low]], dtype=torch.float32))) * O1 + \
-                              sigmoid(3 * (torch.tensor([[query_boundary_high]], dtype=torch.float32) - split_value)) * O2
+
+                    # 计算分割后两个子空间内的对象数量（考虑联合概率）
+                    if dim == 0:  # 分割纬度
+                        # 左侧子空间：[lat_min, split_value] x [lon_min, lon_max]
+                        O1 = torch.clamp((F_split - F_lat_min) * (F_lon_max - F_lon_min) * total_kw, min=0.0)
+                        # 右侧子空间：[split_value, lat_max] x [lon_min, lon_max]
+                        O2 = torch.clamp((F_lat_max - F_split) * (F_lon_max - F_lon_min) * total_kw, min=0.0)
+                    else:  # 分割经度
+                        # 左侧子空间：[lat_min, lat_max] x [lon_min, split_value]
+                        O1 = torch.clamp((F_lat_max - F_lat_min) * (F_split - F_lon_min) * total_kw, min=0.0)
+                        # 右侧子空间：[lat_min, lat_max] x [split_value, lon_max]
+                        O2 = torch.clamp((F_lat_max - F_lat_min) * (F_lon_max - F_split) * total_kw, min=0.0)
+
+                    # 成本公式：根据查询和分割的关系调整权重
+                    if dim == 0:  # 分割纬度
+                        cost_kw = sigmoid(3 * (split_value - torch.tensor([[query_lat_low]], dtype=torch.float32))) * O1 + \
+                                  sigmoid(3 * (torch.tensor([[query_lat_high]], dtype=torch.float32) - split_value)) * O2
+                    else:  # 分割经度
+                        cost_kw = sigmoid(3 * (split_value - torch.tensor([[query_lon_low]], dtype=torch.float32))) * O1 + \
+                                  sigmoid(3 * (torch.tensor([[query_lon_high]], dtype=torch.float32) - split_value)) * O2
+
                     cost += cost_kw.squeeze()
-
-                    # # 输出调试信息
-                    # print(f"Query: {query}")
-                    # print(f"Keyword: {kw}，total_kw:{total_kw}")
-                    # print(f"boundary_low: {boundary_low}, boundary_high: {boundary_high}")
-                    # print(f"F_low: {F_low.item():.4f}, F_split: {F_split.item():.4f}, F_high: {F_high.item():.4f}")
-                    # print(f"O1: {O1.item():.4f}, O2: {O2.item():.4f}, cost_kw: {cost_kw.item():.4f}")
-                    # print("-" * 50)
-
-                # else: # 低频关键词直接被忽略了
-
 
             total_cost = total_cost + cost
 
@@ -255,7 +369,6 @@ def SGDLearn(subspace, dim, query_workload, cdf_models, epochs=15, lr=0.01):
             split_value.data.clamp_(subspace['min_lat'], subspace['max_lat'])
         else:
             split_value.data.clamp_(subspace['min_lon'], subspace['max_lon'])
-        # print(f"total cost:{total_cost}")
 
         total_cost.backward()
         optimizer.step()
