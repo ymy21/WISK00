@@ -1,6 +1,6 @@
 from data_preparation import load_real_dataset, generate_query_workload
-from cdf_model import train_cdf_models
-from bottom_clusters import bottom_clusters_generation,visualize_clusters,visualize_clusters_advanced
+from cdf_model import train_cdf_models, visualize_cdf_model
+from bottom_clusters import bottom_clusters_generation,visualize_clusters
 from dqn_packing import (
     hierarchical_packing_training,
     final_tree_construction,
@@ -23,16 +23,20 @@ def main():
     # 1. 准备数据
     print("Loading real dataset and generating query workload...")
     file_path = "dataset/dataset_TSMC2014_NYC.txt"  # 更新为真实数据集的路径
-    num_object = 200
+    num_object = 2000
     data = load_real_dataset(file_path, num_objects=num_object)
-    num_query = 100
+    num_query = 1000
     query_workload = generate_query_workload(data, num_queries=num_query, num_keywords=5, buffer=0.01)
     print("Dataset and query workload generated.")
 
     # 2. 训练 CDF 模型
     print("Training CDF models...")
-    cdf_models = train_cdf_models(data, query_workload['train'])
+    cdf_models = train_cdf_models(data)
     print("CDF models trained.")
+    #可视化几个关键词的CDF模型
+    important_keywords = list(cdf_models.keys())[:5]  # 选择前5个关键词
+    for keyword in important_keywords:
+        visualize_cdf_model(keyword, cdf_models[keyword], data)
 
     # 3. 定义数据空间（改为列表形式）
     # 初始化变量
@@ -199,3 +203,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+# x-->longitude-->dim=1
+# y-->latitude-->dim=0

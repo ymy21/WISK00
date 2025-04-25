@@ -3,11 +3,9 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 import numpy as np
-from sklearn.preprocessing import QuantileTransformer  # 引入分位数变换工具
 from scipy.stats import norm  # 用于计算标准正态CDF或高斯近似
 import matplotlib.pyplot as plt
 from torch.nn import Linear
-from data_preparation import GLOBAL_GEO_BOUNDS
 
 # 全局缓存字典，避免重复计算 CDF 模型的前向传播
 cdf_cache = {}
@@ -23,23 +21,19 @@ def get_cdf_value(model, value, keyword, dimension):
     if key not in cdf_cache:
         if model['gaussian']:
             # 高斯近似处理
-            min_val = GLOBAL_GEO_BOUNDS['min_lon'] if dimension == 'lon' else GLOBAL_GEO_BOUNDS['min_lat']
-            max_val = GLOBAL_GEO_BOUNDS['max_lon'] if dimension == 'lon' else GLOBAL_GEO_BOUNDS['max_lat']
-            range_val = max_val - min_val
-            normalized_value = (value - min_val) / range_val
             params = model['x'] if dimension == 'lon' else model['y']
-            cdf = norm.cdf(normalized_value, loc=params['mean'], scale=params['std'])
+            cdf = norm.cdf(value, loc=params['mean'], scale=params['std'])
             cdf_cache[key] = cdf
         else:
-            # 神经网络模型处理
+            # 神经网络模型处理 - 修改：直接使用原始坐标值
             model_nn = model['x'] if dimension == 'lon' else model['y']
-            value_tensor = torch.tensor([[value]], dtype=torch.float32) if not isinstance(value,
-                                                                                          torch.Tensor) else value.view(
-                1, 1)
+            value_tensor = torch.tensor([[value]], dtype=torch.float32)
+
             with torch.no_grad():
                 result = model_nn(value_tensor)
                 cdf_cache[key] = result.item()
-        return cdf_cache[key]
+
+    return cdf_cache[key]
 
 
 # 全局变量：保存查询工作负载中各关键词的频率
@@ -58,16 +52,10 @@ class MonotonicLinear(nn.Module):
         return torch.matmul(x, weight.t()) + self.bias_raw
 
 
-# 修改后的 CDFModel 使用 MonotonicLinear 层
+# 修改后的 CDFModel 使用Linear层
 class CDFModel(nn.Module):
-    def __init__(self, input_dim=1, hidden_dim=16, num_layers=4, dimension='lon'):
+    def __init__(self, input_dim=1, hidden_dim=16, num_layers=4):
         super(CDFModel, self).__init__()
-        self.dimension = dimension
-        self.min_val = GLOBAL_GEO_BOUNDS['min_lon'] if dimension == 'lon' else GLOBAL_GEO_BOUNDS['min_lat']
-        self.max_val = GLOBAL_GEO_BOUNDS['max_lon'] if dimension == 'lon' else GLOBAL_GEO_BOUNDS['max_lat']
-        self.range_val = self.max_val - self.min_val
-        if self.range_val <= 0:
-            raise ValueError(f"Invalid range for {dimension}: min={self.min_val}, max={self.max_val}")
         self.layers = nn.ModuleList()
         # 第一层
         self.layers.append(Linear(input_dim, hidden_dim))
@@ -79,12 +67,10 @@ class CDFModel(nn.Module):
         self.sigmoid = nn.Sigmoid()
 
     def forward(self, x):
-        # 输入x应为原始值，内部自动归一化
-        x_normalized = (x - self.min_val) / self.range_val
         for layer in self.layers[:-1]:
-            x_normalized = torch.relu(layer(x_normalized))
+            x = torch.relu(layer(x))
         # 输出层后接 sigmoid 确保输出在 [0,1] 范围内
-        return self.sigmoid(self.layers[-1](x_normalized))
+        return self.sigmoid(self.layers[-1](x))
 
 
 def compute_cdf_targets(data, sorted_indices=None):
@@ -111,7 +97,7 @@ def compute_cdf_targets(data, sorted_indices=None):
     return target_cdf.view(-1, 1)
 
 
-def train_cdf_models(data, query_workload, epochs=100, lr=0.06):
+def train_cdf_models(data, epochs=800, lr=0.001):
     """
     训练CDF模型，为每个关键词创建两个CDF模型（x和y方向）
 
@@ -124,7 +110,6 @@ def train_cdf_models(data, query_workload, epochs=100, lr=0.06):
 
     Args:
         data: 数据集
-        query_workload: 查询工作负载（DataFrame或字典列表）
         epochs: NN训练轮数（仅对高频关键词有效）
         lr: 学习率
 
@@ -133,9 +118,6 @@ def train_cdf_models(data, query_workload, epochs=100, lr=0.06):
     """
     print("开始CDF模型训练...")
 
-    # 转换为字典列表格式
-    query_workload = query_workload.to_dict('records') if isinstance(query_workload, pd.DataFrame) else query_workload
-    global GLOBAL_GEO_BOUNDS
     # 遍历数据集中的每个对象，统计关键词的出现次数
     keyword_counts = {}
     total_keyword_num = 0
@@ -151,21 +133,12 @@ def train_cdf_models(data, query_workload, epochs=100, lr=0.06):
     low_threshold = 0.000001  # 低频关键词
     medium_threshold =0.0001  # 中频关键词
 
-    # 提取所有关键词（从查询和数据集的并集）
+    # 提取所有关键词
     keywords = set(keyword_counts.keys())
 
     cdf_models = {}
     global cdf_cache
     cdf_cache = {}
-    # 获取全局边界参数
-    min_lon = GLOBAL_GEO_BOUNDS['min_lon']
-    max_lon = GLOBAL_GEO_BOUNDS['max_lon']
-    min_lat = GLOBAL_GEO_BOUNDS['min_lat']
-    max_lat = GLOBAL_GEO_BOUNDS['max_lat']
-
-    # 计算归一化范围（防止除零）
-    lon_range = max_lon - min_lon
-    lat_range = max_lat - min_lat
 
     for keyword in keywords:
         freq = keyword_freq.get(keyword, 0)
@@ -185,29 +158,24 @@ def train_cdf_models(data, query_workload, epochs=100, lr=0.06):
 
         # print(f"使用 {len(keyword_data)} 条数据训练关键词 {keyword} 的模型")
 
-        # 使用原始经纬度数据
-        x_vals_orig = keyword_data['longitude'].values.reshape(-1, 1)
-        y_vals_orig = keyword_data['latitude'].values.reshape(-1, 1)
-
-        # 计算归一化后的数据用于目标CDF
-        x_vals_norm = (x_vals_orig - min_lon) / lon_range
-        y_vals_norm = (y_vals_orig - min_lat) / lat_range
+        # 在预处理中已经做了归一化
+        x_vals = keyword_data['longitude'].values.reshape(-1, 1)
+        y_vals = keyword_data['latitude'].values.reshape(-1, 1)
 
         if freq < medium_threshold:
             # 中频关键词：使用高斯近似
             # print(f"关键词 {keyword} 为中频关键词，采用高斯近似")
             # 直接使用原始数据计算均值和标准差
-            x_mean = x_vals_orig.mean().item()
-            x_std = max(x_vals_orig.std().item(), 1e-6)
-            y_mean = y_vals_orig.mean().item()
-            y_std = max(y_vals_orig.std().item(), 1e-6)
-
+            x_mean = x_vals.mean().item()
+            x_std = max(x_vals.std().item(), 1e-6)
+            y_mean = y_vals.mean().item()
+            y_std = max(y_vals.std().item(), 1e-6)
 
             # 将高斯参数保存，不训练NN
             cdf_models[keyword] = {
                 'gaussian': True,
-                'x_mean': x_mean, 'x_std': x_std,
-                'y_mean': y_mean, 'y_std': y_std,
+                'x': {'mean': x_mean, 'std': x_std},  # 统一结构
+                'y': {'mean': y_mean, 'std': y_std},  # 统一结构
                 'total_kw': total_kw  # 保存关键词总频数
             }
             # # 绘制高斯近似的CDF曲线
@@ -236,63 +204,45 @@ def train_cdf_models(data, query_workload, epochs=100, lr=0.06):
 
         else:
             # 高频关键词：采用NN预测CDF
-            # print(f"关键词 {keyword} 为高频关键词，采用 NN 拟合排序的 CDF")
-            # # 使用 QuantileTransformer 计算目标 CDF（基于排序）
-            # qt_x = QuantileTransformer(output_distribution='uniform', random_state=0)
-            # qt_y = QuantileTransformer(output_distribution='uniform', random_state=0)
-            # x_vals = keyword_data['longitude'].values.reshape(-1, 1)
-            # y_vals = keyword_data['latitude'].values.reshape(-1, 1)
-            # target_x_np = qt_x.fit_transform(x_vals)
-            # target_y_np = qt_y.fit_transform(y_vals)
-            # target_x = torch.tensor(target_x_np, dtype=torch.float32)
-            # target_y = torch.tensor(target_y_np, dtype=torch.float32)
+            x_data = torch.tensor(x_vals, dtype=torch.float32)
+            y_data = torch.tensor(y_vals, dtype=torch.float32)
 
-            # 获取经度、纬度数据
-            # x_vals = keyword_data['longitude'].values.reshape(-1, 1)
-            # y_vals = keyword_data['latitude'].values.reshape(-1, 1)
+            # 排序，为了后续计算目标CDF
+            sorted_x = torch.argsort(x_data.view(-1))
+            sorted_y = torch.argsort(y_data.view(-1))
 
-            # 高频：直接使用原始坐标数据训练
-            x_data = torch.tensor(x_vals_orig, dtype=torch.float32)
-            y_data = torch.tensor(y_vals_orig, dtype=torch.float32)
+            # 使用compute_cdf_targets函数计算目标CDF
+            target_x = compute_cdf_targets(x_data, sorted_x)
+            target_y = compute_cdf_targets(y_data, sorted_y)
 
-            # 排序后的目标CDF（基于原始数据排序）
-            sorted_x = np.sort(x_vals_orig.flatten())
-            sorted_y = np.sort(y_vals_orig.flatten())
-            target_x = torch.tensor(
-                np.arange(1, len(sorted_x) + 1) / len(sorted_x),
-                dtype=torch.float32
-            ).view(-1, 1)
-            target_y = torch.tensor(
-                np.arange(1, len(sorted_y) + 1) / len(sorted_y),
-                dtype=torch.float32
-            ).view(-1, 1)
-
-            # 初始化模型（自动处理归一化）
-            model_x = CDFModel(dimension='lon')
-            model_y = CDFModel(dimension='lat')
+            # 初始化模型
+            model_x = CDFModel()
+            model_y = CDFModel()
             criterion = nn.MSELoss()
-            optimizer_x = optim.SGD(model_x.parameters(), lr=lr)
-            optimizer_y = optim.SGD(model_y.parameters(), lr=lr)
+            optimizer_x = optim.Adam(model_x.parameters(), lr=lr, weight_decay=1e-5) #用adam替代sgd，加快收敛
+            optimizer_y = optim.Adam(model_y.parameters(), lr=lr, weight_decay=1e-5)
 
             # 训练X方向
             model_x.train()
             for epoch in range(epochs):
                 optimizer_x.zero_grad()
-                outputs = model_x(x_data)
+                outputs = model_x(x_data) # 使用排序位置而非原始坐标
                 loss = criterion(outputs, target_x)
                 loss.backward()
                 optimizer_x.step()
-                # print(f"关键词: {keyword}, X方向, Epoch {epoch}, Loss: {loss.item():.6f}")
+                if epoch % 10 == 0:
+                    print(f"关键词: {keyword}, X方向, Epoch {epoch}, Loss: {loss.item():.6f}")
 
             # 训练Y方向
             model_y.train()
             for epoch in range(epochs):
                 optimizer_y.zero_grad()
-                outputs = model_y(y_data)
+                outputs = model_y(y_data) # 使用排序位置而非原始坐标
                 loss = criterion(outputs, target_y)
                 loss.backward()
                 optimizer_y.step()
-                # print(f"关键词: {keyword}, Y方向, Epoch {epoch}, Loss: {loss.item():.6f}")
+                if epoch % 10 == 0:
+                    print(f"关键词: {keyword}, Y方向, Epoch {epoch}, Loss: {loss.item():.6f}")
 
             cdf_models[keyword] = {
                 'gaussian': False,
@@ -340,3 +290,106 @@ def train_cdf_models(data, query_workload, epochs=100, lr=0.06):
     return cdf_models
 
 
+def visualize_cdf_model(keyword, model, data):
+    """
+    可视化CDF模型预测与真实CDF的比较
+    """
+    # 获取包含该关键词的数据
+    keyword_data = data[data['keywords'].apply(lambda x: keyword in x)]
+
+    if len(keyword_data) < 10:
+        print(f"警告: 关键词 {keyword} 的数据量不足 ({len(keyword_data)} 条)")
+        return
+
+    # 提取坐标数据
+    x_vals = keyword_data['longitude'].values.reshape(-1, 1)
+    y_vals = keyword_data['latitude'].values.reshape(-1, 1)
+
+    # 转换为张量
+    x_data = torch.tensor(x_vals, dtype=torch.float32)
+    y_data = torch.tensor(y_vals, dtype=torch.float32)
+
+    # 排序索引
+    sort_idx_x = torch.argsort(x_data.view(-1))
+    sort_idx_y = torch.argsort(y_data.view(-1))
+
+    # 计算目标CDF
+    target_x = compute_cdf_targets(x_data, sort_idx_x)
+    target_y = compute_cdf_targets(y_data, sort_idx_y)
+
+    # 将数据转换为numpy数组，方便后续处理
+    x_vals_np = x_data.numpy().flatten()
+    y_vals_np = y_data.numpy().flatten()
+    target_x_np = target_x.numpy().flatten()
+    target_y_np = target_y.numpy().flatten()
+
+    # 获取排序后的索引，用于可视化
+    sort_idx_x_np = np.argsort(x_vals_np)
+    sort_idx_y_np = np.argsort(y_vals_np)
+
+    # 排序后的原始值
+    sorted_x_vals = x_vals_np[sort_idx_x_np]
+    sorted_y_vals = y_vals_np[sort_idx_y_np]
+
+    # 排序后的目标CDF值
+    sorted_target_x = target_x_np[sort_idx_x_np]
+    sorted_target_y = target_y_np[sort_idx_y_np]
+
+    # 模型预测
+    if model['gaussian']:
+        # 高斯模型预测
+        x_mean = model['x']['mean']
+        x_std = model['x']['std']
+        y_mean = model['y']['mean']
+        y_std = model['y']['std']
+
+        # 计算预测的CDF值 - 直接使用原始坐标
+        pred_x = np.array([norm.cdf(val, loc=x_mean, scale=x_std) for val in sorted_x_vals])
+        pred_y = np.array([norm.cdf(val, loc=y_mean, scale=y_std) for val in sorted_y_vals])
+    else:
+        # 神经网络模型预测
+        model_x = model['x']
+        model_y = model['y']
+
+        # 创建排序后的坐标张量
+        sorted_x_tensor = torch.tensor(sorted_x_vals.reshape(-1, 1), dtype=torch.float32)
+        sorted_y_tensor = torch.tensor(sorted_y_vals.reshape(-1, 1), dtype=torch.float32)
+
+        # 使用模型预测
+        with torch.no_grad():
+            pred_x = model_x(sorted_x_tensor).numpy().flatten()
+            pred_y = model_y(sorted_y_tensor).numpy().flatten()
+
+    # 可视化
+    fig, axs = plt.subplots(1, 2, figsize=(16, 6))
+
+    # 经度CDF
+    axs[0].plot(sorted_x_vals, sorted_target_x, 'b-', label='true CDF')
+    axs[0].plot(sorted_x_vals, pred_x, 'r--', label='predict CDF')
+    axs[0].set_title(f'{keyword} - longitude CDF')
+    axs[0].set_xlabel('longitude')
+    axs[0].set_ylabel('CDF')
+    axs[0].legend()
+    axs[0].grid(True)
+
+    # 纬度CDF
+    axs[1].plot(sorted_y_vals, sorted_target_y, 'b-', label='true CDF')
+    axs[1].plot(sorted_y_vals, pred_y, 'r--', label='predict CDF')
+    axs[1].set_title(f'{keyword} - latitude CDF')
+    axs[1].set_xlabel('latitude')
+    axs[1].set_ylabel('CDF')
+    axs[1].legend()
+    axs[1].grid(True)
+
+    plt.tight_layout()
+    plt.show()
+
+    # 计算误差指标
+    mse_x = np.mean((pred_x - sorted_target_x) ** 2)
+    mse_y = np.mean((pred_y - sorted_target_y) ** 2)
+    mae_x = np.mean(np.abs(pred_x - sorted_target_x))
+    mae_y = np.mean(np.abs(pred_y - sorted_target_y))
+
+    print(f"关键词 {keyword} 的CDF预测误差:")
+    print(f"  经度 - MSE: {mse_x:.6f}, MAE: {mae_x:.6f}")
+    print(f"  纬度 - MSE: {mse_y:.6f}, MAE: {mae_y:.6f}")
