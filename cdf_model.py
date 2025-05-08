@@ -97,10 +97,10 @@ def compute_cdf_targets(data, sorted_indices=None):
     return target_cdf.view(-1, 1)
 
 
-def train_cdf_models(data, epochs=800, lr=0.001):
+def train_cdf_models(data, queries, epochs=800, lr=0.01):
     """
     训练CDF模型，为每个关键词创建两个CDF模型（x和y方向）
-
+    修改：只训练查询工作负载中出现的关键词，以提高效率
     根据论文要求：
       - 低频关键词（频率 ≤ 0.001‰）：忽略训练
       - 中频关键词（0.001‰ < 频率 < 0.1‰）：采用高斯近似
@@ -110,6 +110,7 @@ def train_cdf_models(data, epochs=800, lr=0.001):
 
     Args:
         data: 数据集
+        queries：查询工作负载集
         epochs: NN训练轮数（仅对高频关键词有效）
         lr: 学习率
 
@@ -130,17 +131,26 @@ def train_cdf_models(data, epochs=800, lr=0.001):
     keyword_freq = {kw: (count / total_keyword_num)  for kw, count in keyword_counts.items()}
 
     # 定义频率阈值
-    low_threshold = 0.000001  # 低频关键词
-    medium_threshold =0.0001  # 中频关键词
+    low_threshold = 0.000001  # 低频关键词 0.000001
+    medium_threshold =0.0001  # 中频关键词0.0001
 
-    # 提取所有关键词
+    # 提取data集所有关键词
     keywords = set(keyword_counts.keys())
+
+    # 提取query集所有关键词
+    query_keywords = set()
+    if isinstance(queries, pd.DataFrame):
+        queries = queries.to_dict('records')
+    for query in queries:
+        query_keywords.update(query['keywords'])
+    print(f"只训练查询工作负载中的 {len(query_keywords)} 个关键词的CDF模型")
 
     cdf_models = {}
     global cdf_cache
     cdf_cache = {}
 
-    for keyword in keywords:
+    for keyword in query_keywords:
+    # for keyword in keywords:
         freq = keyword_freq.get(keyword, 0)
         total_kw = keyword_counts.get(keyword, 0)  # 记录每个关键词的总频次
         # print(f"处理关键词 {keyword}, 频率: {freq:.6f}")
@@ -152,7 +162,7 @@ def train_cdf_models(data, epochs=800, lr=0.001):
 
         # 获取包含该关键词的数据
         keyword_data = data[data['keywords'].apply(lambda x: keyword in x)]
-        if len(keyword_data) < 10:
+        if len(keyword_data) < 15:
             # print(f"警告: 关键词 {keyword} 的数据量不足 ({len(keyword_data)} 条)，跳过训练。")
             continue
 
@@ -164,7 +174,7 @@ def train_cdf_models(data, epochs=800, lr=0.001):
 
         if freq < medium_threshold:
             # 中频关键词：使用高斯近似
-            # print(f"关键词 {keyword} 为中频关键词，采用高斯近似")
+            print(f"关键词 {keyword} 为中频关键词，采用高斯近似")
             # 直接使用原始数据计算均值和标准差
             x_mean = x_vals.mean().item()
             x_std = max(x_vals.std().item(), 1e-6)
@@ -178,32 +188,10 @@ def train_cdf_models(data, epochs=800, lr=0.001):
                 'y': {'mean': y_mean, 'std': y_std},  # 统一结构
                 'total_kw': total_kw  # 保存关键词总频数
             }
-            # # 绘制高斯近似的CDF曲线
-            # sort_idx_x = np.argsort(x_data.numpy().flatten())
-            # sort_idx_y = np.argsort(y_data.numpy().flatten())
-            # sorted_x = x_data.numpy().flatten()[sort_idx_x]
-            # sorted_target_x = target_x.numpy().flatten()[sort_idx_x]
-            # sorted_y = y_data.numpy().flatten()[sort_idx_y]
-            # sorted_target_y = target_y.numpy().flatten()[sort_idx_y]
-            #
-            # plt.figure(figsize=(12, 5))
-            # plt.subplot(1, 2, 1)
-            # plt.plot(sorted_x, sorted_target_x, label='Gaussian CDF', marker='o', linestyle='-')
-            # plt.title(f"Keyword: {keyword} - Longitude (X) Gaussian CDF")
-            # plt.xlabel("Longitude")
-            # plt.ylabel("CDF")
-            # plt.legend()
-            # plt.subplot(1, 2, 2)
-            # plt.plot(sorted_y, sorted_target_y, label='Gaussian CDF', marker='o', linestyle='-')
-            # plt.title(f"Keyword: {keyword} - Latitude (Y) Gaussian CDF")
-            # plt.xlabel("Latitude")
-            # plt.ylabel("CDF")
-            # plt.legend()
-            # plt.tight_layout()
-            # plt.show()
 
         else:
             # 高频关键词：采用NN预测CDF
+            print(f"关键词 {keyword} 为高频关键词，采用神经网络近似")
             x_data = torch.tensor(x_vals, dtype=torch.float32)
             y_data = torch.tensor(y_vals, dtype=torch.float32)
 
@@ -230,8 +218,8 @@ def train_cdf_models(data, epochs=800, lr=0.001):
                 loss = criterion(outputs, target_x)
                 loss.backward()
                 optimizer_x.step()
-                if epoch % 10 == 0:
-                    print(f"关键词: {keyword}, X方向, Epoch {epoch}, Loss: {loss.item():.6f}")
+                #if epoch % 10 == 0:
+                    #print(f"关键词: {keyword}, X方向, Epoch {epoch}, Loss: {loss.item():.6f}")
 
             # 训练Y方向
             model_y.train()
@@ -241,8 +229,8 @@ def train_cdf_models(data, epochs=800, lr=0.001):
                 loss = criterion(outputs, target_y)
                 loss.backward()
                 optimizer_y.step()
-                if epoch % 10 == 0:
-                    print(f"关键词: {keyword}, Y方向, Epoch {epoch}, Loss: {loss.item():.6f}")
+                #if epoch % 10 == 0:
+                    #print(f"关键词: {keyword}, Y方向, Epoch {epoch}, Loss: {loss.item():.6f}")
 
             cdf_models[keyword] = {
                 'gaussian': False,
@@ -251,40 +239,6 @@ def train_cdf_models(data, epochs=800, lr=0.001):
                 'total_kw': total_kw
             }
 
-            # # 绘制 NN 预测的CDF与目标CDF对比图
-            # with torch.no_grad():
-            #     pred_x = model_x(x_data).detach().numpy().flatten()
-            #     pred_y = model_y(y_data).detach().numpy().flatten()
-            # x_vals = x_data.numpy().flatten()
-            # y_vals = y_data.numpy().flatten()
-            # target_x_np = target_x.numpy().flatten()
-            # target_y_np = target_y.numpy().flatten()
-            # sort_idx_x = np.argsort(x_vals)
-            # sort_idx_y = np.argsort(y_vals)
-            # sorted_x = x_vals[sort_idx_x]
-            # sorted_pred_x = pred_x[sort_idx_x]
-            # sorted_target_x = target_x_np[sort_idx_x]
-            # sorted_y = y_vals[sort_idx_y]
-            # sorted_pred_y = pred_y[sort_idx_y]
-            # sorted_target_y = target_y_np[sort_idx_y]
-            #
-            # plt.figure(figsize=(12, 5))
-            # plt.subplot(1, 2, 1)
-            # plt.plot(sorted_x, sorted_pred_x, label='Predicted CDF', marker='o', linestyle='-')
-            # plt.plot(sorted_x, sorted_target_x, label='Target CDF', marker='x', linestyle='--')
-            # plt.title(f"Keyword: {keyword} - Longitude (X)")
-            # plt.xlabel("Longitude")
-            # plt.ylabel("CDF")
-            # plt.legend()
-            # plt.subplot(1, 2, 2)
-            # plt.plot(sorted_y, sorted_pred_y, label='Predicted CDF', marker='o', linestyle='-')
-            # plt.plot(sorted_y, sorted_target_y, label='Target CDF', marker='x', linestyle='--')
-            # plt.title(f"Keyword: {keyword} - Latitude (Y)")
-            # plt.xlabel("Latitude")
-            # plt.ylabel("CDF")
-            # plt.legend()
-            # plt.tight_layout()
-            # plt.show()
 
     print(f"CDF模型训练完成，共 {len(cdf_models)} 个关键词")
     return cdf_models
@@ -297,9 +251,9 @@ def visualize_cdf_model(keyword, model, data):
     # 获取包含该关键词的数据
     keyword_data = data[data['keywords'].apply(lambda x: keyword in x)]
 
-    if len(keyword_data) < 10:
-        print(f"警告: 关键词 {keyword} 的数据量不足 ({len(keyword_data)} 条)")
-        return
+    # if len(keyword_data) < 10:
+    #     print(f"警告: 关键词 {keyword} 的数据量不足 ({len(keyword_data)} 条)")
+    #     return
 
     # 提取坐标数据
     x_vals = keyword_data['longitude'].values.reshape(-1, 1)

@@ -18,36 +18,103 @@ GLOBAL_GEO_BOUNDS = {
     'max_lon': 1.0
 }
 
-def load_real_dataset(file_path, num_objects=None):
+# def load_real_dataset(file_path, num_objects=None):  #用于FS数据集
+#     """
+#     从 TSV 文件中加载真实数据集。文件包含 8 列：
+#       1. User ID
+#       2. Venue ID
+#       3. Venue category ID
+#       4. Venue category name (作为关键词，可能包含空格或特殊字符)
+#       5. Latitude
+#       6. Longitude
+#       7. Timezone offset
+#       8. UTC time
+#
+#     返回 DataFrame，保留列：latitude, longitude, keywords，其中 keywords 为列表格式。
+#     此处直接对 latitude 与 longitude 进行归一化处理，归一化采用全局最小–最大方式。
+#     """
+#     global GLOBAL_OBJECT_POOL, GLOBAL_OBJECT_INDEX, KEYWORD_MAPPING
+#
+#     # 修改1：添加正确的编码参数（尝试以下编码之一）
+#     df = pd.read_csv(
+#         file_path,
+#         sep='\t',
+#         header=None,
+#         names=[
+#             'user_id', 'venue_id', 'venue_category_id', 'venue_category_name',
+#             'latitude', 'longitude', 'timezone_offset', 'utc_time'
+#         ],
+#         encoding='ISO-8859-1'
+#     )
+#
+#     # 修改2：检查实际数据行数是否足够
+#     if num_objects is not None and num_objects > len(df):
+#         print(f"Warning: Requested {num_objects} objects but only {len(df)} available")
+#         num_objects = len(df)
+#
+#     if num_objects is not None:
+#         df = df.sample(n=num_objects, random_state=42).reset_index(drop=True)
+#
+#     # 构建关键词映射，将 venue_category_name 编码为 int
+#     unique_keywords = df['venue_category_name'].str.strip().unique()
+#     KEYWORD_MAPPING = {kw: i for i, kw in enumerate(unique_keywords)}
+#
+#     # 将每个 venue_category_name 转换为编码后的列表
+#     df['keywords'] = df['venue_category_name'].apply(lambda x: [KEYWORD_MAPPING[x.strip()]])
+#     df = df[['latitude', 'longitude', 'keywords']]
+#
+#     # 计算全局经纬度边界（基于原始数据）
+#     min_lat = df['latitude'].min()
+#     max_lat = df['latitude'].max()
+#     min_lon = df['longitude'].min()
+#     max_lon = df['longitude'].max()
+#
+#     # 对经纬度进行归一化：归一化到 [0, 1]
+#     df['latitude'] = df['latitude'].apply(lambda x: (x - min_lat) / (max_lat - min_lat + 1e-6))
+#     df['longitude'] = df['longitude'].apply(lambda x: (x - min_lon) / (max_lon - min_lon + 1e-6))
+#
+#     # 更新全局对象池和索引（使用归一化后的经纬度）
+#     GLOBAL_OBJECT_POOL = df[['latitude', 'longitude', 'keywords']].to_dict('records')
+#     for idx, row in df.iterrows():
+#         GLOBAL_OBJECT_INDEX[idx] = row['keywords']  # 存储关键词索引
+#
+#     # 更新全局经纬度边界为标准化后的值
+#     GLOBAL_GEO_BOUNDS['min_lat'] = 0.0
+#     GLOBAL_GEO_BOUNDS['max_lat'] = 1.0
+#     GLOBAL_GEO_BOUNDS['min_lon'] = 0.0
+#     GLOBAL_GEO_BOUNDS['max_lon'] = 1.0
+#
+#     return df
+
+def load_real_dataset(file_path, num_objects=None): #用于osm
     """
-    从 TSV 文件中加载真实数据集。文件包含 8 列：
-      1. User ID
-      2. Venue ID
-      3. Venue category ID
-      4. Venue category name (作为关键词，可能包含空格或特殊字符)
-      5. Latitude
-      6. Longitude
-      7. Timezone offset
-      8. UTC time
+    从 CSV 文件中加载OpenStreetMap数据集。文件包含至少 3 列：
+      1. latitude（纬度）
+      2. longitude（经度）
+      3. keyword（关键词，如地点名称或类型）
 
     返回 DataFrame，保留列：latitude, longitude, keywords，其中 keywords 为列表格式。
     此处直接对 latitude 与 longitude 进行归一化处理，归一化采用全局最小–最大方式。
     """
     global GLOBAL_OBJECT_POOL, GLOBAL_OBJECT_INDEX, KEYWORD_MAPPING
 
-    # 修改1：添加正确的编码参数（尝试以下编码之一）
+    # 从CSV文件读取数据
     df = pd.read_csv(
         file_path,
-        sep='\t',
-        header=None,
-        names=[
-            'user_id', 'venue_id', 'venue_category_id', 'venue_category_name',
-            'latitude', 'longitude', 'timezone_offset', 'utc_time'
-        ],
-        encoding='ISO-8859-1'
+        encoding='utf-8'
     )
 
-    # 修改2：检查实际数据行数是否足够
+    # 检查列名是否符合预期
+    required_columns = ['latitude', 'longitude', 'keyword']
+    for col in required_columns:
+        if col not in df.columns:
+            raise ValueError(f"Required column '{col}' not found in the dataset")
+
+    # 检查是否有空值，并删除
+    df = df.dropna(subset=required_columns)
+    print(f"Loaded {len(df)} objects after removing null values")
+
+    # 修改：检查实际数据行数是否足够
     if num_objects is not None and num_objects > len(df):
         print(f"Warning: Requested {num_objects} objects but only {len(df)} available")
         num_objects = len(df)
@@ -55,12 +122,17 @@ def load_real_dataset(file_path, num_objects=None):
     if num_objects is not None:
         df = df.sample(n=num_objects, random_state=42).reset_index(drop=True)
 
-    # 构建关键词映射，将 venue_category_name 编码为 int
-    unique_keywords = df['venue_category_name'].str.strip().unique()
+    # 构建关键词映射，将关键词编码为整数
+    unique_keywords = df['keyword'].str.strip().unique()
     KEYWORD_MAPPING = {kw: i for i, kw in enumerate(unique_keywords)}
 
-    # 将每个 venue_category_name 转换为编码后的列表
-    df['keywords'] = df['venue_category_name'].apply(lambda x: [KEYWORD_MAPPING[x.strip()]])
+    # 打印关键词映射信息
+    print(f"Created mapping for {len(KEYWORD_MAPPING)} unique keywords")
+
+    # 将每个keyword转换为编码后的列表（这里keyword已经是最终关键词）
+    df['keywords'] = df['keyword'].apply(lambda x: [KEYWORD_MAPPING[x.strip()]])
+
+    # 保留需要的列
     df = df[['latitude', 'longitude', 'keywords']]
 
     # 计算全局经纬度边界（基于原始数据）
@@ -68,6 +140,9 @@ def load_real_dataset(file_path, num_objects=None):
     max_lat = df['latitude'].max()
     min_lon = df['longitude'].min()
     max_lon = df['longitude'].max()
+
+    print(f"Original lat range: [{min_lat}, {max_lat}]")
+    print(f"Original lon range: [{min_lon}, {max_lon}]")
 
     # 对经纬度进行归一化：归一化到 [0, 1]
     df['latitude'] = df['latitude'].apply(lambda x: (x - min_lat) / (max_lat - min_lat + 1e-6))
@@ -84,37 +159,43 @@ def load_real_dataset(file_path, num_objects=None):
     GLOBAL_GEO_BOUNDS['min_lon'] = 0.0
     GLOBAL_GEO_BOUNDS['max_lon'] = 1.0
 
+    # 观察归一化后的数据分布
+    plt.figure(figsize=(12, 6))
 
-#
-# #观察原始数据分布
-#     plt.figure(figsize=(12, 6))
-#
-#     # 绘制纬度的直方图
-#     plt.subplot(1, 2, 1)
-#     sns.histplot(df['latitude'], bins=50, kde=True)
-#     plt.title('Latitude Distribution')
-#
-#     # 绘制经度的直方图
-#     plt.subplot(1, 2, 2)
-#     sns.histplot(df['longitude'], bins=50, kde=True)
-#     plt.title('Longitude Distribution')
-#
-#     plt.tight_layout()
-#     plt.show()
-#     plt.figure(figsize=(6, 6))
-#     stats.probplot(df['latitude'], dist="norm", plot=plt)
-#     plt.title('Q-Q Plot of Latitude')
-#     plt.show()
-#
-#     plt.figure(figsize=(6, 6))
-#     stats.probplot(df['longitude'], dist="norm", plot=plt)
-#     plt.title('Q-Q Plot of Longitude')
-#     plt.show()
+    # 绘制纬度的直方图
+    plt.subplot(1, 2, 1)
+    sns.histplot(df['latitude'], bins=50, kde=True)
+    plt.title('Normalized Latitude Distribution')
+
+    # 绘制经度的直方图
+    plt.subplot(1, 2, 2)
+    sns.histplot(df['longitude'], bins=50, kde=True)
+    plt.title('Normalized Longitude Distribution')
+
+    plt.tight_layout()
+    plt.savefig('normalized_distribution.png')
+    plt.close()
+
+    # 绘制数据点的空间分布
+    plt.figure(figsize=(10, 10))
+    plt.scatter(df['longitude'], df['latitude'], s=10, alpha=0.5)
+    plt.xlabel('Normalized Longitude')
+    plt.ylabel('Normalized Latitude')
+    plt.title('Spatial Distribution of Data Points')
+    plt.grid(True)
+    plt.savefig('data_points_distribution.png')
+    plt.close()
+
+    # 分析关键词分布
+    keyword_counts = df['keywords'].apply(lambda x: x[0]).value_counts()
+    print(f"Top 10 most common keywords:")
+    for idx, (code, count) in enumerate(keyword_counts.head(10).items()):
+        keyword = list(KEYWORD_MAPPING.keys())[list(KEYWORD_MAPPING.values()).index(code)]
+        print(f"{idx + 1}. {keyword}: {count} occurrences")
 
     return df
 
-
-def sample_center(df, method='UNI', buffer=0.01):
+def sample_center(df, method, buffer=0.01):
     """
     从归一化后的数据集中采样一个中心点。
     buffer 的单位同样为归一化后的比例（范围[0,1]）。
@@ -167,7 +248,7 @@ def generate_query_workload(df, num_queries=500, num_keywords=5, buffer=0.01):
     queries = []
     global_keywords = list(set(df['keywords'].explode().unique()))
     for _ in range(num_queries):
-        center = sample_center(df, method='MIX', buffer=buffer)
+        center = sample_center(df, method='UNI', buffer=buffer)
         query_min_lat = center['latitude'] - buffer
         query_max_lat = center['latitude'] + buffer
         query_min_lon = center['longitude'] - buffer
@@ -182,8 +263,7 @@ def generate_query_workload(df, num_queries=500, num_keywords=5, buffer=0.01):
             query_keywords = random.sample(center['keywords'], num_keywords)
         else:
             remaining_keywords = list(set(global_keywords) - set(center['keywords']))
-            query_keywords = center['keywords'] + random.sample(remaining_keywords,
-                                                                num_keywords - len(center['keywords']))
+            query_keywords = center['keywords'] + random.sample(remaining_keywords,num_keywords - len(center['keywords']))
         queries.append({
             'area': {
                 'min_lat': query_min_lat,
@@ -193,8 +273,8 @@ def generate_query_workload(df, num_queries=500, num_keywords=5, buffer=0.01):
             },
             'keywords': query_keywords
         })
-    num_train = int(num_queries * 0.6)
-    num_build = int(num_queries * 0.2)
+    num_train = int(num_queries * 0.3)
+    num_build = int(num_queries * 0.6)
     workload = {
         'train': pd.DataFrame(queries[:num_train]),
         'compare': pd.DataFrame(queries[num_train:num_train + num_build]),
@@ -214,8 +294,7 @@ def generate_query_workload(df, num_queries=500, num_keywords=5, buffer=0.01):
         area = query['area']
         width = area['max_lon'] - area['min_lon']
         height = area['max_lat'] - area['min_lat']
-        rect = patches.Rectangle((area['min_lon'], area['min_lat']), width, height, edgecolor='red', facecolor='none',
-                                 lw=2)
+        rect = patches.Rectangle((area['min_lon'], area['min_lat']), width, height, edgecolor='red', facecolor='none',lw=2)
         plt.gca().add_patch(rect)
 
     plt.xlabel('Longitude')

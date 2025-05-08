@@ -1,6 +1,6 @@
 from data_preparation import load_real_dataset, generate_query_workload
 from cdf_model import train_cdf_models, visualize_cdf_model
-from bottom_clusters import bottom_clusters_generation,visualize_clusters
+from bottom_clusters import bottom_clusters_generation, visualize_clusters, test_cost_estimation
 from dqn_packing import (
     hierarchical_packing_training,
     final_tree_construction,
@@ -14,29 +14,44 @@ import torch
 from rtree_index import compare_rtree_wisk
 import matplotlib.pyplot as plt
 import seaborn as sns
-
+import numpy as np
+import random
+import os
+from measure_costs import measure_costs
 def main():
+    os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
+    # 设置随机种子以确保实验可重复性
+    seed = 42
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)  # 如果使用多GPU
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+
     # 定义 device，若 GPU 可用则使用 cuda
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print("Using device:", device)
 
     # 1. 准备数据
     print("Loading real dataset and generating query workload...")
-    file_path = "dataset/dataset_TSMC2014_NYC.txt"  # 更新为真实数据集的路径
+    file_path = "dataset/dataset_BEIJING.csv"  # 更新为真实数据集的路径
     num_object = 2000
     data = load_real_dataset(file_path, num_objects=num_object)
-    num_query = 1000
-    query_workload = generate_query_workload(data, num_queries=num_query, num_keywords=5, buffer=0.01)
+    num_query = 50
+    query_workload = generate_query_workload(data, num_queries=num_query, num_keywords=3, buffer=0.01)
     print("Dataset and query workload generated.")
 
     # 2. 训练 CDF 模型
     print("Training CDF models...")
-    cdf_models = train_cdf_models(data)
+    cdf_models = train_cdf_models(data,query_workload['train'])
     print("CDF models trained.")
     #可视化几个关键词的CDF模型
-    important_keywords = list(cdf_models.keys())[:5]  # 选择前5个关键词
-    for keyword in important_keywords:
-        visualize_cdf_model(keyword, cdf_models[keyword], data)
+    # important_keywords = list(cdf_models.keys())[:20]  # 选择前20个关键词
+    # for keyword in important_keywords:
+    #     visualize_cdf_model(keyword, cdf_models[keyword], data)
 
     # 3. 定义数据空间（改为列表形式）
     # 初始化变量
@@ -81,8 +96,27 @@ def main():
     }]
 
     # 4. 生成底层聚类（clusters）
+    # test_cost_estimation([data_space[0]], query_workload['train'], cdf_models)
+
+    # # 测量w1、w2
+    # print("\n===== 测量簇扫描和对象验证成本 =====")
+    # cluster_scan_time, object_verify_time, cost_ratio = measure_costs(
+    #     objects,  # 原始数据点
+    #     query_workload['train'],  # 训练查询
+    #     None,  # 还没有簇，将自动创建
+    #     num_trials=50,  # 减少trials数量以加快测试
+    #     sample_size=min(1000, len(objects))  # 最多使用1000个对象
+    # )
+
+    # # 根据测量结果设置w1和w2
+    # recommended_w1 = max(1, round(cost_ratio / 10))  # 简单的启发式方法
+    # w1 = recommended_w1
+    # w2 = 1
+    # print(f"基于测量结果，将使用 w1={w1}, w2={w2}")
+
+
     print("Generating bottom clusters...")
-    clusters = bottom_clusters_generation(query_workload['train'], data_space, cdf_models, w1=0.1, w2=1)
+    clusters = bottom_clusters_generation(query_workload['train'], data_space, cdf_models, w1=0.5, w2=1)
     print(f"Bottom clusters generated: {len(clusters)} clusters.")
 
     # 5. 构建底层节点
@@ -112,11 +146,8 @@ def main():
     #     bottom_nodes.append(bottom_node)
     print(f"Bottom nodes built: {len(clusters)} nodes.")
 
-    # 基础可视化
-    visualize_clusters(clusters, objects)
-
-    # 高级可视化，包含更多细节
-    # visualize_clusters_advanced(clusters, objects, train_queries)
+    # 簇可视化
+    visualize_clusters(clusters, objects, train_queries, output_file='clustering_result.png')
 
     avg_objects_per_leaf = num_object // len(clusters)
     # 6. 强化学习训练阶段
@@ -149,7 +180,7 @@ def main():
     # 9. 处理查询
     print("Processing queries...")
     eval_queries = query_workload['eval'].to_dict('records')
-    for query in eval_queries:
+    for query in train_queries:
         result = process_query(query, root_node)
         print(f"Query: {query['keywords']}, Result: {len(result)} objects found.")
     print("Query processing completed.")
@@ -166,7 +197,10 @@ def main():
             'keywords': list(row['keywords'])
         })
     # 调用增强版的比较函数
-    comparison_results = compare_rtree_wisk(objects, root_node, comp_queries,avg_objects_per_leaf)
+    print("\ntrain和compare用的同一个query集:")
+    comparison_results = compare_rtree_wisk(objects, root_node, train_queries, avg_objects_per_leaf, clusters)  #用同一个数据集试试
+    print("\ntrain和compare用的不同query集:")
+    comparison_results = compare_rtree_wisk(objects, root_node, comp_queries, avg_objects_per_leaf, clusters)
 
     # # 可以选择绘制图表进行可视化
     # if sns is not None:  # 确保seaborn已安装
